@@ -1,20 +1,19 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# 项目上下文：创建 OpenSpec 制品时提供给 AI。
+context: |
+  技术栈：Rust、SQLite、RMCP（MCP stdio server）。
+  项目处于预实现设计阶段，优先遵循 OpenSpec 工作流。
+  文档自然语言正文以中文为主；保留必要的英文术语、标识符、代码、命令和协议关键字。
+  领域：面向 AI Coding Agent 的 Local-First 多层记忆系统。
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+# 制品规则：适用于已有和后续的 OpenSpec 文档。
+rules:
+  proposal:
+    - 自然语言正文以中文为主，保留必要的英文术语、标识符、代码、命令和协议关键字。
+  design:
+    - 自然语言正文以中文为主，保留必要的英文术语、标识符、代码、命令和协议关键字。
+  specs:
+    - 自然语言正文以中文为主，保留 OpenSpec 结构关键字、必要的英文术语、标识符、代码、命令和协议关键字。
+  tasks:
+    - 自然语言正文以中文为主，保留必要的英文术语、标识符、代码、命令和协议关键字。
