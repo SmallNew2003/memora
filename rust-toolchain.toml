@@ -1,0 +1,6 @@
+[toolchain]
+# 精确固定 stable toolchain，确保 CI 与本地构建一致。
+# 组件：rustfmt（格式化）与 clippy（lint）。
+channel = "1.94.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

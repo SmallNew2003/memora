@@ -152,10 +152,76 @@ keys 并设置有限 busy timeout。遇到 `SQLITE_BUSY` 时，迁移以 100ms�
 **理由**：当前 Phase 1 不生成 embedding；提前加载向量扩展只增加平台和启动故障面。
 SQLite adapter 的隔离确保 Phase 2 能加入该能力而不改变 domain/application API。
 
+### D9：默认数据库目录使用 dirs-next 解析
+
+**选择**：`MEMORA_DB_PATH` 缺失时，使用 `dirs-next` 解析平台本地应用数据目录
+（macOS: `~/Library/Application Support/memora/memora.db`，Linux:
+`~/.local/share/memora/memora.db`），并以 `create_dir_all` 创建父目录，目录权限
+收紧为 `0700`。路径解析失败或目录不可写时返回可操作错误，提示设置
+`MEMORA_DB_PATH` 覆盖，且不泄漏无关系统路径。
+
+**理由**：MCP server 由宿主 Agent 作为子进程拉起，强制要求环境变量会让每个宿主
+都必须手工配置才能启动，直接违背零配置原则；`dirs-next` 消除了三平台路径拼接的
+手写差异。
+
+**替代方案考虑**：
+- *强制要求 `MEMORA_DB_PATH`*：最显式，但零配置是核心原则，MCP 宿主场景下不可用。
+
+### D10：runtime_version 编译期注入
+
+**选择**：`memora_status` 响应中的 `runtime_version` 使用
+`env!("CARGO_PKG_VERSION")` 编译期注入；代码中不维护第二份版本号，发布时只 bump
+`Cargo.toml` 的 `version`。
+
+**理由**：零运行时文件依赖、零额外失败模式，且保证上报版本永远与实际 binary 一致。
+
+**替代方案考虑**：
+- *运行时读取 `Cargo.toml`*：引入文件依赖和读取失败模式；本项目没有单一 manifest
+  驱动多版本 artifact 的需求。
+
+### D11：质量门禁范围限定为本地三道门禁，cargo deny 与跨平台 CI 推迟
+
+**选择**：本变更只交付 `cargo fmt --check`、`cargo clippy --locked -- -D warnings`、
+`cargo test --locked` 三道本地门禁，并写入开发者文档。`cargo deny`、CI 流水线和
+跨平台构建推迟到首个 L1 变更落地前的发布准备变更中一次性引入。
+
+**理由**：bootstrap 的价值是可验证的地基而非发布管线；当前依赖面小，`cargo deny`
+的调优和 CI 调试投入在空仓库上空转，等 L1 有真实代码后投入才有产出。
+
+**替代方案考虑**：
+- *本次全部引入*：一步到位，但地基阶段就要调试 deny.toml 与 CI 矩阵，拖慢主线。
+- *本次只加最小单平台 CI*：仍有 CI 调试成本，且本地门禁已覆盖同等检查。
+
+### D12：锁定 RMCP 2.2.0，并采用显式 server handler 与 stdio lifecycle
+
+**选择**：`Cargo.toml` 将 RMCP 精确固定为
+`rmcp = { version = "=2.2.0", default-features = false, features = ["server", "transport-io"] }`。
+server 使用官方 tag `rmcp-v2.2.0` 验证的宏与生命周期形态：在 handler 上使用
+`#[tool_router]`，通过 `#[tool_handler(...)] impl ServerHandler for ...` 声明 server
+metadata，以 `ServiceExt::serve(rmcp::transport::stdio())` 启动，并等待
+`service.waiting()`。`memora_status` 需要自定义 server metadata，故不使用只适用于
+tools-only server 的 `#[tool_router(server_handler)]` 快捷形式。
+
+RMCP 2.2.0 的 `ProtocolVersion::LATEST` 为 `2025-11-25`。server 保持 SDK 的标准
+`initialize` 协商行为，不在应用层重复维护 protocol version；MCP contract test 以
+`2025-11-25` 发起 `initialize`，并断言响应返回相同的协商版本，然后再发送
+`notifications/initialized`、`tools/list` 和 `tools/call`。
+
+**理由**：精确版本和最小 feature 集使锁文件可复现，且避免默认 feature 将不需要的
+HTTP/client 能力带入初始 runtime。显式 `ServerHandler` 同时满足当前 `memora_status`
+的 metadata 需求和未来增添非 tool server capability 的扩展空间。将协商断言纳入
+contract test，可在 RMCP 升级时直接发现 lifecycle 或 protocol 行为漂移。
+
+**替代方案考虑**：
+- *使用 `rmcp = "2.2"` 或默认 features*：允许依赖解析漂移，并引入 bootstrap 不需要的能力。
+- *使用 `#[tool_router(server_handler)]`*：样板更少，但无法声明所需的自定义 server metadata。
+- *在应用层硬编码单一 protocol version*：绕开 SDK 已有协商逻辑，降低与不同 MCP 客户端的兼容性。
+
 ## Risks / Trade-offs
 
-- **[风险] 当前 RMCP API 再次发生变动。** → 锁定已验证版本，使用官方 service
-  示例的实际编译与 MCP contract test 作为升级门禁。
+- **[风险] 当前 RMCP API 再次发生变动。** → 锁定 `rmcp 2.2.0` 与 `server`、
+  `transport-io` feature，使用官方 `rmcp-v2.2.0` service 形态的实际编译、
+  `initialize` 协商和 MCP contract test 作为升级门禁。
 - **[风险] SQLite 迁移中断或并发启动导致锁竞争。** → 单事务迁移、busy timeout、
   `BEGIN IMMEDIATE` 迁移锁与连续前缀检查；失败即中止服务，不在失败后启动半可用
   MCP server。
@@ -187,8 +253,6 @@ SQLite adapter 的隔离确保 Phase 2 能加入该能力而不改变 domain/app
 
 ## Open Questions
 
-1. 默认目录是否使用 `dirs-next`，还是由 CLI 强制要求显式 `MEMORA_DB_PATH`？当前
-   倾向前者以保持零配置。
-2. 初始健康响应的运行时版本是编译期注入，还是从 `Cargo.toml` 读取？倾向编译期
-   注入以避免运行时文件依赖。
-3. 初始质量门禁是否把 `cargo deny` 与跨平台构建加入 CI，还是先保留给发布前变更？
+无。原有三个开放问题已于 2026-07-20 决议：默认数据库目录使用 `dirs-next`（D9）、
+`runtime_version` 编译期注入（D10）、`cargo deny` 与跨平台 CI 推迟到发布准备变更
+（D11）。
