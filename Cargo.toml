@@ -1,0 +1,53 @@
+[package]
+name = "memora"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+description = "Local-first multi-layer memory system for AI coding agents"
+license = "MIT OR Apache-2.0"
+
+# memora 在 Phase 1 是单一二进制 crate。模块边界由 src/ 下的目录提供，
+# crate 边界在出现稳定公共 API 需求前不再拆分（见 openspec proposal D1）。
+
+[[bin]]
+name = "memora"
+path = "src/main.rs"
+
+[dependencies]
+# MCP 框架：精确锁版本 + 最小 feature 集（见 design D12）。
+# `macros` 启用 `#[tool]` / `#[tool_handler]` / `#[tool_router]` 宏；
+# `server` 启用 `ServerHandler`；`transport-io` 启用 stdio transport。
+rmcp = { version = "=2.2.0", default-features = false, features = ["server", "transport-io", "macros"] }
+
+# 异步运行时：rmcp 需要 Tokio。
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+# SQLite + bundled：单二进制不依赖宿主 SQLite（见 design D7/D8）。
+# 本变更不加载 sqlite-vec（design D8）。
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 路径解析：跨平台本地数据目录（design D9）。
+dirs-next = "2.0"
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 错误处理
+thiserror = "1"
+
+# 日志：仅写 stderr（design D2 / spec rust-runtime-foundation "配置与协议日志隔离"）。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# SHA-256 校验和：迁移表使用（design D4）。
+sha2 = "0.10"
+
+[dev-dependencies]
+# 集成测试：临时数据库 + 进程级 stdio 验证。
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
