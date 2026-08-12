@@ -43,6 +43,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # SHA-256 校验和：迁移表使用（design D4）。
 sha2 = "0.10"
 
+# JSON Schema：domain 层的 ClientCapabilities / OperationMode 直接派生
+# JsonSchema（不依赖 rmcp::schemars re-export），避免 domain 与 transport 耦合。
+# 与 rmcp 0.2.2 内嵌的 schemars 版本（1.x）二进制兼容。
+schemars = "1"
+
 [dev-dependencies]
 # 集成测试：临时数据库 + 进程级 stdio 验证。
 tempfile = "3"
