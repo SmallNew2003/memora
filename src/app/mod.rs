@@ -8,8 +8,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::adapters::mcp::{serve_stdio, MemoraServer};
-use crate::adapters::sqlite::{SqliteError, SqliteHealthRepository};
-use crate::application::HealthService;
+use crate::adapters::sqlite::{SqliteError, SqliteHealthRepository, SqliteMemoryRepository};
+use crate::application::{HealthService, MemoryService};
 use crate::config::RuntimeConfig;
 use crate::domain::Transport;
 
@@ -35,17 +35,23 @@ pub enum AppError {
 pub async fn run_stdio(config: RuntimeConfig) -> Result<(), AppError> {
     // 1. 启动期：在 blocking 线程上打开数据库并应用所有迁移。
     let db_path = config.db_path.clone();
-    let repo: SqliteHealthRepository =
-        tokio::task::spawn_blocking(move || SqliteHealthRepository::bootstrap(db_path))
-            .await
-            .map_err(AppError::BootstrapJoin)?
-            .map_err(AppError::Sqlite)?;
+    let (repo, mem_repo) = tokio::task::spawn_blocking(move || {
+        // health repo：单独打开一次连接以拿 schema_version
+        let health_repo = SqliteHealthRepository::bootstrap(db_path.clone())?;
+        // memory repo：复用同一路径，运行期在每次调用时打开独立连接
+        let mem_repo = SqliteMemoryRepository::bootstrap(db_path);
+        Ok::<_, SqliteError>((health_repo, mem_repo))
+    })
+    .await
+    .map_err(AppError::BootstrapJoin)?
+    .map_err(AppError::Sqlite)?;
 
-    // 2. 组装 application service。
+    // 2. 组装 application services。
     let health = Arc::new(HealthService::new(repo, Transport::Stdio));
+    let memory = Arc::new(MemoryService::new(mem_repo));
 
     // 3. 组装 MCP adapter。
-    let server = MemoraServer::new(health);
+    let server = MemoraServer::<SqliteMemoryRepository>::new(health, memory);
 
     // 4. 启动 stdio transport 并等待生命周期结束。
     serve_stdio(server).await.map_err(AppError::Mcp)?;

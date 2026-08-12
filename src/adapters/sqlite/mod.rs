@@ -9,6 +9,10 @@
 //! 该模块 MUST NOT 被 application / domain 直接依赖；调用方经 `application::HealthRepository`
 //! port 间接触达。
 
+pub mod memory_repository;
+
+pub use memory_repository::SqliteMemoryRepository;
+
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -157,10 +161,11 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_caches_schema_version_one() {
+    fn bootstrap_caches_schema_version_two() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("memora.db");
         let repo = SqliteHealthRepository::bootstrap(db).expect("bootstrap");
-        assert_eq!(repo.current_schema_version(), 1);
+        // v1 + v2 均已应用，最高版本号 = 2。
+        assert_eq!(repo.current_schema_version(), 2);
     }
 }
