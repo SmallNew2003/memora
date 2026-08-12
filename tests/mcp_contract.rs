@@ -188,10 +188,22 @@ fn mcp_health_contract_initialize_tools_list_tools_call() {
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
         .collect();
-    assert!(
-        names.contains(&"memora_status"),
-        "tools/list must include memora_status, got {names:?}"
-    );
+    // 7 个 tool：memora_status + 6 个 L1 业务 tool。
+    let expected: &[&str] = &[
+        "memora_status",
+        "session_start",
+        "session_end",
+        "observe",
+        "recent_observations",
+        "recent_sessions",
+        "search",
+    ];
+    for name in expected {
+        assert!(
+            names.contains(name),
+            "tools/list must include {name}, got {names:?}"
+        );
+    }
 
     // 4. tools/call(memora_status)
     let call = serde_json::json!({
@@ -283,7 +295,8 @@ fn health_service_reports_healthy_for_stdio_transport() {
     assert_eq!(status.status, "healthy");
     assert_eq!(status.database, "healthy");
     assert_eq!(status.transport, "stdio");
-    assert_eq!(status.schema_version, 1);
+    // v1 + v2 已应用 → schema_version = 2。
+    assert_eq!(status.schema_version, 2);
 
     // 把 SqliteError / RuntimeConfig 引用一下，避免 unused 警告。
     let _: Result<SqliteHealthRepository, SqliteError> =
@@ -304,5 +317,6 @@ fn migrations_record_checksum_and_reapply_is_noop() {
             row.get(0)
         })
         .expect("count");
-    assert_eq!(n, 1, "exactly one migration row");
+    // v1 + v2 均应已记录；count = 2。
+    assert_eq!(n, 2, "exactly v1 and v2 migration rows");
 }

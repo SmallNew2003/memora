@@ -3,6 +3,18 @@
 //! 定义 repository port 与 health query；MUST NOT 依赖 rusqlite、RMCP、文件系统。
 //! 端口的具体实现在 `adapters::sqlite` 中提供。
 
+pub mod errors;
+pub mod ids;
+pub mod ports;
+pub mod use_cases;
+
+pub use errors::MemoryError;
+pub use ids::uuid_v4;
+pub use ports::{
+    MemoryRepository, ObserveInput, SearchInput, SearchKind, SessionEndInput, SessionStartInput,
+};
+pub use use_cases::MemoryService;
+
 use crate::domain::{RuntimeStatus, Transport};
 
 /// Repository port：application 通过该 trait 访问持久化层，
@@ -53,9 +65,9 @@ mod tests {
 
     #[test]
     fn health_service_reports_repo_schema_version() {
-        let svc = HealthService::new(FakeRepo { version: 1 }, Transport::Stdio);
+        let svc = HealthService::new(FakeRepo { version: 2 }, Transport::Stdio);
         let s = svc.status();
-        assert_eq!(s.schema_version, 1);
+        assert_eq!(s.schema_version, 2);
         assert_eq!(s.status, "healthy");
         assert_eq!(s.database, "healthy");
         assert_eq!(s.transport, "stdio");

@@ -19,10 +19,16 @@ pub struct Migration {
 }
 
 /// 启动期内嵌的迁移集合。版本必须连续：从 1 开始，每次递增 1。
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("v001__schema_migrations.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("v001__schema_migrations.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("v002__l1_memory.sql"),
+    },
+];
 
 const SCHEMA_MIGRATIONS_DDL: &str = "\
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -247,7 +253,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut conn = Connection::open(dir.path().join("fresh.db")).expect("open");
         let version = apply_pending(&mut conn).expect("apply");
-        assert_eq!(version, 1);
+        // binary 当前内嵌 v1 + v2；fresh db 一键应用全部，最高版本号 = 2。
+        assert_eq!(version, 2);
     }
 
     #[test]
@@ -285,19 +292,20 @@ mod tests {
     #[test]
     fn database_too_new_is_rejected() {
         // 场景「旧 binary 打开已升级数据库」：记录版本高于 binary 内嵌最高版本。
+        // binary 当前内嵌最高版本 2，因此塞入 version = 3 模拟 future。
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("future.db");
         let mut conn = conn_with_v1_applied(&db);
 
         conn.execute(
             "INSERT INTO schema_migrations (version, checksum) VALUES (?1, ?2)",
-            rusqlite::params![2u32, "future-checksum"],
+            rusqlite::params![3u32, "future-checksum"],
         )
         .expect("seed future version");
 
         let err = apply_pending(&mut conn).expect_err("must reject");
         match err {
-            MigrationError::DatabaseTooNew { recorded, .. } => assert_eq!(recorded, 2),
+            MigrationError::DatabaseTooNew { recorded, .. } => assert_eq!(recorded, 3),
             other => panic!("expected DatabaseTooNew, got {other:?}"),
         }
     }
