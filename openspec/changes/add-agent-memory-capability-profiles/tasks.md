@@ -1,22 +1,22 @@
 ## 1. 前置条件与数据模型
 
-- [ ] 1.1 确认 Cargo workspace 与 Phase 1 的 session/observation 基础存储已落地；未满足时先完成其独立变更，不在本变更中重复初始化项目
+- [x] 1.1 确认 Cargo workspace 与 Phase 1 的 session/observation 基础存储已落地；未满足时先完成其独立变更，不在本变更中重复初始化项目
   - **涉及文件**：`Cargo.toml`、`src/migrations/v002__l1_memory.sql`、`src/domain/session.rs`、`src/domain/observation.rs`、`src/migrations/mod.rs`
   - **涉及测试**：`tests/l1_session_memory.rs`（若不存在则属阻塞，需先合 PR #2 `feat/l1-session-memory`）
   - **AC**：① `git rev-parse --abbrev-ref HEAD` 在执行 `git diff main` 时仍能列出 `src/domain/session.rs` 等 L1 文件；② `cargo test` 能跑通 L1 测试集；③ 本地 `~/.local/share/memora/memora.db` 启动后 `memora_status` 的 `schema_version` 字段返回 2
-- [ ] 1.2 定义并校验 `ClientCapabilities` 与 `OperationMode` 类型，为缺失能力声明实现 `stateless-manual` 保守默认值
+- [x] 1.2 定义并校验 `ClientCapabilities` 与 `OperationMode` 类型，为缺失能力声明实现 `stateless-manual` 保守默认值
   - **涉及文件**：`src/domain/capability.rs`（新增）、`src/domain/mod.rs`
   - **涉及测试**：`src/domain/capability.rs` 内嵌 `#[cfg(test)] mod tests`
   - **AC**：① 五个 capability 字段 (`native_memory`、`session_lifecycle`、`tool_capture`、`context_injection`、`max_context_tokens`) 都实现 `Deserialize + Serialize + schemars::JsonSchema`；② `OperationMode` 枚举仅含三个变体 `NativeOpaque` / `StatelessHooked` / `StatelessManual`；③ 单元测试覆盖 `ClientCapabilities::default()` 返回 `stateless-manual` 路径并断言 `resolve_operation_mode(&ClientCapabilities::default()) == OperationMode::StatelessManual`
-- [ ] 1.3 为 session 持久化 `agent_id`、可选 `external_session_ref`、客户端能力快照、运行模式、活跃时间和归档状态
+- [x] 1.3 为 session 持久化 `agent_id`、可选 `external_session_ref`、客户端能力快照、运行模式、活跃时间和归档状态
   - **涉及文件**：`src/migrations/v003__capability_profile_session.sql`（新增）、`src/adapters/sqlite/memory_repository.rs`、`src/domain/session.rs`、`src/application/ports.rs`、`src/application/use_cases/start_session.rs`、`src/application/use_cases/end_session.rs`
   - **涉及测试**：`tests/capability_profiles_session.rs`（新增）
   - **AC**：① `v003` 迁移为 `sessions` 表追加 `capabilities_json TEXT`、`operation_mode TEXT`、`last_active_at TEXT`、`archived_at TEXT`；② `SessionStartInput` 接受可选 `client_capabilities` 与 `external_session_ref`；③ `start_session` 在未提供能力时把 `operation_mode` 持久化为 `"stateless-manual"`；④ 单元测试断言：`start_session(name="x", capabilities=None)` 写入的行 `operation_mode="stateless-manual"` 且 `capabilities_json IS NULL`
-- [ ] 1.4 为记忆记录持久化 scope、kind、origin、project、内容哈希、authority、来源引用、过期与替代关系元数据，并为查询字段建立索引
+- [x] 1.4 为记忆记录持久化 scope、kind、origin、project、内容哈希、authority、来源引用、过期与替代关系元数据，并为查询字段建立索引
   - **涉及文件**：`src/migrations/v003__capability_profile_session.sql`（同一迁移内 ALTER）、`src/domain/observation.rs`、`src/domain/summary.rs`、`src/application/use_cases/observe.rs`、`src/application/use_cases/search.rs`、`src/adapters/sqlite/memory_repository.rs`
   - **涉及测试**：`tests/capability_profiles_provenance.rs`（新增）
   - **AC**：① `observations` / `summaries` 表追加 `scope`、`kind`、`origin`、`project_id`、`content_hash`、`authority`、`source_refs_json`、`expires_at`、`supersedes_id`、`fact_key` 字段；② 为 `(origin)`、`(scope, project_id)`、`(fact_key)` 建索引；③ `observe` 在 `tool_result` 路径写入 `origin="tool_result"` 并计算 SHA-256 `content_hash`；④ 单元测试断言：跨 session 同 `fact_key` 不同值的两条记录各自保留 `conflict_state` 字段可读
-- [ ] 1.5 设计并实施兼容迁移，确保已有 session 与 observation 在新字段缺失时可按保守默认值读取
+- [x] 1.5 设计并实施兼容迁移，确保已有 session 与 observation 在新字段缺失时可按保守默认值读取
   - **涉及文件**：`src/migrations/v003__capability_profile_session.sql`、`src/adapters/sqlite/memory_repository.rs`、`src/application/ports.rs`
   - **涉及测试**：`src/adapters/sqlite/memory_repository.rs` 内嵌测试 + `tests/capability_profiles_migration.rs`
   - **AC**：① 旧 v002 数据库升级到 v003 后所有原行 `scope='session'`、`kind='observation'`、`origin='user'`、`authority='l1_observation'`、`content_hash=NULL`（触发回填逻辑填值）；② `recent_observations` 行为与 L1 现状一致（不加 scope 过滤）；③ 升级路径测试：用预先准备的 v002 schema 快照 db 启动后断言新查询不丢旧数据

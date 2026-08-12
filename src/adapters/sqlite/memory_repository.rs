@@ -16,7 +16,9 @@ use crate::application::ports::{
     MemoryRepository, ObserveInput, SearchInput, SearchKind, SessionEndInput, SessionStartInput,
 };
 use crate::application::MemoryError;
-use crate::domain::{Observation, ObservationId, SearchHit, Session, SessionId, SummaryId};
+use crate::domain::{
+    Observation, ObservationId, OperationMode, SearchHit, Session, SessionId, SummaryId,
+};
 
 /// 启动期实例化的 repository。运行期每个调用通过 `db_path` 在
 /// `spawn_blocking` 边界上打开短生命周期连接。
@@ -49,33 +51,35 @@ impl MemoryRepository for SqliteMemoryRepository {
         let conn = self.open()?;
         let id = uuid_v4();
         let created_at = now_utc();
+        // v003：capability profile 1.3 落地 —— INSERT 写齐 v003 新增 4 列 +
+        // v002 预留 3 列。`operation_mode` wire 字符串由 use case 算好后透传。
         conn.execute(
-            "INSERT INTO sessions (id, name, created_at) VALUES (?1, ?2, ?3)",
-            params![id, input.name, created_at],
+            "INSERT INTO sessions (\
+                id, name, created_at, \
+                agent_id, project_id, external_session_ref, \
+                capabilities_json, operation_mode, last_active_at, archived_at\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?3, ?9)",
+            params![
+                id,
+                input.name,
+                created_at,
+                input.agent_id,
+                input.project_id,
+                input.external_session_ref,
+                input.capabilities_json,
+                input.operation_mode.as_wire_str(),
+                None::<Option<String>>, // archived_at = NULL on create
+            ],
         )
         .map_err(|e| MemoryError::Storage(Box::new(e)))?;
-        let row = conn
-            .query_row(
-                "SELECT id, name, created_at, ended_at, summary FROM sessions WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                    ))
-                },
-            )
-            .map_err(|e| MemoryError::Storage(Box::new(e)))?;
-        Ok(Session {
-            id: SessionId(row.0),
-            name: row.1,
-            created_at: row.2,
-            ended_at: row.3,
-            summary: row.4,
-        })
+        let session = self
+            .read_session(&conn, &SessionId(id.clone()))
+            .ok_or_else(|| {
+                MemoryError::Storage(Box::new(std::io::Error::other(
+                    "freshly inserted session row is missing",
+                )))
+            })?;
+        Ok(session)
     }
 
     fn end_session(&self, input: SessionEndInput) -> Result<Session, MemoryError> {
@@ -118,9 +122,29 @@ impl MemoryRepository for SqliteMemoryRepository {
             )
             .map_err(|e| MemoryError::Storage(Box::new(e)))?;
             let summary_id = uuid_v4();
+            // v003：summary INSERT 写齐 10 列（content_hash + 9 个 provenance 列）。
             tx.execute(
-                "INSERT INTO summaries (id, session_id, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![summary_id, input.session_id.0, summary_content, ended_at],
+                "INSERT INTO summaries (\
+                    id, session_id, content, created_at, \
+                    content_hash, scope, kind, origin, project_id, \
+                    authority, source_refs_json, expires_at, supersedes_id, fact_key\
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    summary_id,
+                    input.session_id.0,
+                    summary_content,
+                    ended_at,
+                    input.summary_content_hash,
+                    input.summary_scope,
+                    input.summary_kind,
+                    input.summary_origin,
+                    None::<Option<String>>, // summary project_id 暂无入参
+                    input.summary_authority,
+                    input.summary_source_refs_json,
+                    None::<Option<String>>, // summary expires_at 暂无入参
+                    None::<Option<String>>, // summary supersedes_id 暂无入参
+                    None::<Option<String>>, // summary fact_key 暂无入参
+                ],
             )
             .map_err(|e| MemoryError::Storage(Box::new(e)))?;
         }
@@ -158,19 +182,13 @@ impl MemoryRepository for SqliteMemoryRepository {
         if let Some(key) = input.idempotency_key.as_deref() {
             let existing: Option<Observation> = tx
                 .query_row(
-                    "SELECT id, session_id, content, tool_name, created_at \
+                    "SELECT id, session_id, content, tool_name, created_at, \
+                            content_hash, scope, kind, origin, project_id, \
+                            authority, source_refs_json, expires_at, supersedes_id, fact_key \
                      FROM observations \
                      WHERE session_id = ?1 AND idempotency_key = ?2",
                     params![input.session_id.0, key],
-                    |row| {
-                        Ok(Observation {
-                            id: ObservationId(row.get::<_, String>(0)?),
-                            session_id: SessionId(row.get::<_, String>(1)?),
-                            content: row.get::<_, String>(2)?,
-                            tool_name: row.get::<_, Option<String>>(3)?,
-                            created_at: row.get::<_, String>(4)?,
-                        })
-                    },
+                    map_observation,
                 )
                 .optional()
                 .map_err(|e| MemoryError::Storage(Box::new(e)))?;
@@ -182,13 +200,33 @@ impl MemoryRepository for SqliteMemoryRepository {
             }
         }
 
-        // 2. INSERT 新行。
+        // 2. INSERT 新行（v003：写齐全部 14 列）。
         let id = uuid_v4();
         let created_at = now_utc();
         tx.execute(
-            "INSERT INTO observations (id, session_id, content, tool_name, idempotency_key, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, input.session_id.0, input.content, input.tool_name, input.idempotency_key, created_at],
+            "INSERT INTO observations (\
+                id, session_id, content, tool_name, idempotency_key, created_at, \
+                content_hash, scope, kind, origin, project_id, \
+                authority, source_refs_json, expires_at, supersedes_id, fact_key\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                id,
+                input.session_id.0,
+                input.content,
+                input.tool_name,
+                input.idempotency_key,
+                created_at,
+                input.content_hash,
+                input.scope,
+                input.kind,
+                input.origin,
+                input.project_id,
+                input.authority,
+                input.source_refs_json,
+                input.expires_at,
+                input.supersedes_id,
+                input.fact_key,
+            ],
         )
         .map_err(|e| MemoryError::Storage(Box::new(e)))?;
 
@@ -200,6 +238,16 @@ impl MemoryRepository for SqliteMemoryRepository {
             content: input.content,
             tool_name: input.tool_name,
             created_at,
+            content_hash: input.content_hash,
+            scope: input.scope,
+            kind: input.kind,
+            origin: input.origin,
+            project_id: input.project_id,
+            authority: input.authority,
+            source_refs_json: input.source_refs_json,
+            expires_at: input.expires_at,
+            supersedes_id: input.supersedes_id,
+            fact_key: input.fact_key,
         })
     }
 
@@ -210,15 +258,18 @@ impl MemoryRepository for SqliteMemoryRepository {
     ) -> Result<Vec<Observation>, MemoryError> {
         let conn = self.open()?;
         let limit_i64 = i64::from(limit);
+        // v003：SELECT 读齐全部 15 列（content_hash + 9 个 provenance 列）。
+        let select_sql = "SELECT id, session_id, content, tool_name, created_at, \
+                                 content_hash, scope, kind, origin, project_id, \
+                                 authority, source_refs_json, expires_at, supersedes_id, fact_key \
+                          FROM observations";
         let rows = if let Some(sid) = session_id {
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, session_id, content, tool_name, created_at \
-                     FROM observations \
-                     WHERE session_id = ?1 \
+                .prepare(&format!(
+                    "{select_sql} WHERE session_id = ?1 \
                      ORDER BY created_at DESC, id DESC \
-                     LIMIT ?2",
-                )
+                     LIMIT ?2"
+                ))
                 .map_err(|e| MemoryError::Storage(Box::new(e)))?;
             let iter = stmt
                 .query_map(params![sid.0, limit_i64], map_observation)
@@ -227,12 +278,11 @@ impl MemoryRepository for SqliteMemoryRepository {
                 .map_err(|e| MemoryError::Storage(Box::new(e)))?
         } else {
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, session_id, content, tool_name, created_at \
-                     FROM observations \
+                .prepare(&format!(
+                    "{select_sql} \
                      ORDER BY created_at DESC, id DESC \
-                     LIMIT ?1",
-                )
+                     LIMIT ?1"
+                ))
                 .map_err(|e| MemoryError::Storage(Box::new(e)))?;
             let iter = stmt
                 .query_map(params![limit_i64], map_observation)
@@ -248,22 +298,16 @@ impl MemoryRepository for SqliteMemoryRepository {
         let limit_i64 = i64::from(limit);
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, created_at, ended_at, summary \
+                "SELECT id, name, created_at, ended_at, summary, \
+                        agent_id, project_id, external_session_ref, \
+                        capabilities_json, operation_mode, last_active_at, archived_at \
                  FROM sessions \
                  ORDER BY created_at DESC, id DESC \
                  LIMIT ?1",
             )
             .map_err(|e| MemoryError::Storage(Box::new(e)))?;
         let iter = stmt
-            .query_map(params![limit_i64], |row| {
-                Ok(Session {
-                    id: SessionId(row.get::<_, String>(0)?),
-                    name: row.get::<_, String>(1)?,
-                    created_at: row.get::<_, String>(2)?,
-                    ended_at: row.get::<_, Option<String>>(3)?,
-                    summary: row.get::<_, Option<String>>(4)?,
-                })
-            })
+            .query_map(params![limit_i64], map_session)
             .map_err(|e| MemoryError::Storage(Box::new(e)))?;
         iter.collect::<Result<Vec<_>, _>>()
             .map_err(|e| MemoryError::Storage(Box::new(e)))
@@ -335,21 +379,51 @@ impl MemoryRepository for SqliteMemoryRepository {
 impl SqliteMemoryRepository {
     fn read_session(&self, conn: &Connection, sid: &SessionId) -> Option<Session> {
         let mut stmt = conn
-            .prepare("SELECT id, name, created_at, ended_at, summary FROM sessions WHERE id = ?1")
+            .prepare(
+                "SELECT id, name, created_at, ended_at, summary, \
+                        agent_id, project_id, external_session_ref, \
+                        capabilities_json, operation_mode, last_active_at, archived_at \
+                 FROM sessions WHERE id = ?1",
+            )
             .ok()?;
-        stmt.query_row(params![sid.0], |row| {
-            Ok(Session {
-                id: SessionId(row.get::<_, String>(0)?),
-                name: row.get::<_, String>(1)?,
-                created_at: row.get::<_, String>(2)?,
-                ended_at: row.get::<_, Option<String>>(3)?,
-                summary: row.get::<_, Option<String>>(4)?,
-            })
-        })
-        .ok()
+        stmt.query_row(params![sid.0], map_session).ok()
     }
 }
 
+/// sessions 表 12 列 → Session 值对象的统一解析器。
+///
+/// 列顺序与 `start_session` / `recent_sessions` / `read_session` 三处 SELECT 一致；
+/// 新增列必须按相同顺序追加到所有 SELECT 站点。
+fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    let mode_str: String = row.get(9)?;
+    let operation_mode = match mode_str.as_str() {
+        "native-opaque" => OperationMode::NativeOpaque,
+        "stateless-hooked" => OperationMode::StatelessHooked,
+        "stateless-manual" => OperationMode::StatelessManual,
+        // 数据库里若出现非契约值，落到保守路径而不是 panic —— 1.3 允许未来
+        // wire 字符串扩展，旧 binary 不会因为读到新字符串直接崩。
+        _ => OperationMode::StatelessManual,
+    };
+    Ok(Session {
+        id: SessionId(row.get::<_, String>(0)?),
+        name: row.get::<_, String>(1)?,
+        created_at: row.get::<_, String>(2)?,
+        ended_at: row.get::<_, Option<String>>(3)?,
+        summary: row.get::<_, Option<String>>(4)?,
+        agent_id: row.get::<_, Option<String>>(5)?,
+        project_id: row.get::<_, Option<String>>(6)?,
+        external_session_ref: row.get::<_, Option<String>>(7)?,
+        capabilities_json: row.get::<_, Option<String>>(8)?,
+        operation_mode,
+        last_active_at: row.get::<_, String>(10)?,
+        archived_at: row.get::<_, Option<String>>(11)?,
+    })
+}
+
+/// observations 表 15 列 → Observation 值对象的统一解析器。
+///
+/// 列顺序与 `observe` / `recent_observations` 的 SELECT 一致；
+/// 新增列必须按相同顺序追加到所有 SELECT 站点。
 fn map_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Observation> {
     Ok(Observation {
         id: ObservationId(row.get::<_, String>(0)?),
@@ -357,6 +431,16 @@ fn map_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Observation> {
         content: row.get::<_, String>(2)?,
         tool_name: row.get::<_, Option<String>>(3)?,
         created_at: row.get::<_, String>(4)?,
+        content_hash: row.get::<_, Option<String>>(5)?,
+        scope: row.get::<_, Option<String>>(6)?,
+        kind: row.get::<_, Option<String>>(7)?,
+        origin: row.get::<_, Option<String>>(8)?,
+        project_id: row.get::<_, Option<String>>(9)?,
+        authority: row.get::<_, Option<String>>(10)?,
+        source_refs_json: row.get::<_, Option<String>>(11)?,
+        expires_at: row.get::<_, Option<String>>(12)?,
+        supersedes_id: row.get::<_, Option<String>>(13)?,
+        fact_key: row.get::<_, Option<String>>(14)?,
     })
 }
 
@@ -482,6 +566,7 @@ fn _silence_summaryid(_: SummaryId) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::OperationMode;
 
     fn repo(dir: &tempfile::TempDir) -> SqliteMemoryRepository {
         let db = dir.path().join("memora.db");
@@ -490,14 +575,57 @@ mod tests {
         SqliteMemoryRepository::bootstrap(db)
     }
 
+    /// 测试 helper：构造一个 `operation_mode = stateless-manual` / 不带 capability 声明的
+    /// `SessionStartInput`。覆盖 v003 新增的 4 列写入默认保守值。
+    fn minimal_session_start(name: &str) -> SessionStartInput {
+        SessionStartInput {
+            name: name.to_string(),
+            agent_id: None,
+            project_id: None,
+            external_session_ref: None,
+            client_capabilities: None,
+            operation_mode: OperationMode::StatelessManual,
+            capabilities_json: None,
+        }
+    }
+
+    /// 测试 helper：构造一个**已经过 use case 填默认值**的 `ObserveInput`。
+    /// v003 起 schema 上 `scope / kind / origin / authority / source_refs_json`
+    /// 是 NOT NULL DEFAULT，adapter 直接传 None 会触发 NOT NULL constraint。
+    /// helper 模拟 use case 已经填默认的状态（与 `observe::execute` 一致），
+    /// 让 L1 测试聚焦"路径覆盖 / 顺序 / 幂等"而不重复 use case 责任。
+    /// `content_hash` 也由 use case 计算，helper 留 None（adapter 写 NULL）。
+    fn minimal_observe(
+        session_id: SessionId,
+        content: String,
+        tool_name: Option<String>,
+        idempotency_key: Option<String>,
+    ) -> ObserveInput {
+        ObserveInput {
+            session_id,
+            content,
+            tool_name,
+            idempotency_key,
+            content_hash: None,
+            origin: Some("user".to_string()),
+            project_id: None,
+            fact_key: None,
+            scope: Some("session".to_string()),
+            kind: Some("observation".to_string()),
+            authority: Some("l1_observation".to_string()),
+            source_refs: None,
+            source_refs_json: Some("[]".to_string()),
+            expires_at: None,
+            supersedes_id: None,
+        }
+    }
+
     #[test]
     fn start_session_returns_row_with_unique_id() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
         let s = r
-            .start_session(SessionStartInput {
-                name: "first".to_string(),
-            })
+            .start_session(minimal_session_start("first"))
             .expect("start");
         assert_eq!(s.name, "first");
         assert!(!s.id.0.is_empty());
@@ -511,15 +639,22 @@ mod tests {
     fn end_session_marks_ended_at_and_writes_summary_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
-        let s = r
-            .start_session(SessionStartInput {
-                name: "s".to_string(),
-            })
-            .expect("start");
+        let s = r.start_session(minimal_session_start("s")).expect("start");
         let ended = r
             .end_session(SessionEndInput {
                 session_id: s.id.clone(),
                 summary: Some("wrap-up".to_string()),
+                // v003 落地：summary_* 字段由 use case 填默认值与 SHA-256。
+                // L1 测试绕开 use case 直调 adapter，自己填上对应默认值，
+                // 与 `end_session::execute` 行为一致。
+                summary_content_hash: Some(
+                    "77543befcf98a9283a45bcf8a13896aec795f99dcaa9c721c263b6f5fb7f4c3f".to_string(),
+                ),
+                summary_kind: Some("summary".to_string()),
+                summary_authority: Some("l1_summary".to_string()),
+                summary_origin: Some("user".to_string()),
+                summary_scope: Some("session".to_string()),
+                summary_source_refs_json: Some("[]".to_string()),
             })
             .expect("end");
         assert!(ended.ended_at.is_some(), "ended_at must be set");
@@ -541,14 +676,16 @@ mod tests {
     fn end_session_without_summary_keeps_summaries_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
-        let s = r
-            .start_session(SessionStartInput {
-                name: "s".to_string(),
-            })
-            .expect("start");
+        let s = r.start_session(minimal_session_start("s")).expect("start");
         r.end_session(SessionEndInput {
             session_id: s.id.clone(),
             summary: None,
+            summary_content_hash: None,
+            summary_kind: None,
+            summary_authority: None,
+            summary_origin: None,
+            summary_scope: None,
+            summary_source_refs_json: None,
         })
         .expect("end");
         let conn = rusqlite::Connection::open(dir.path().join("memora.db")).expect("reopen");
@@ -566,6 +703,12 @@ mod tests {
             .end_session(SessionEndInput {
                 session_id: SessionId("nonexistent".to_string()),
                 summary: None,
+                summary_content_hash: None,
+                summary_kind: None,
+                summary_authority: None,
+                summary_origin: None,
+                summary_scope: None,
+                summary_source_refs_json: None,
             })
             .expect_err("not found");
         assert!(matches!(err, MemoryError::SessionNotFound(_)));
@@ -575,18 +718,14 @@ mod tests {
     fn observe_writes_row_and_returns_id() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
-        let s = r
-            .start_session(SessionStartInput {
-                name: "s".to_string(),
-            })
-            .expect("start");
+        let s = r.start_session(minimal_session_start("s")).expect("start");
         let obs = r
-            .observe(ObserveInput {
-                session_id: s.id.clone(),
-                content: "first".to_string(),
-                tool_name: Some("Bash".to_string()),
-                idempotency_key: Some("k1".to_string()),
-            })
+            .observe(minimal_observe(
+                s.id.clone(),
+                "first".to_string(),
+                Some("Bash".to_string()),
+                Some("k1".to_string()),
+            ))
             .expect("observe");
         assert_eq!(obs.content, "first");
         assert_eq!(obs.tool_name.as_deref(), Some("Bash"));
@@ -597,26 +736,22 @@ mod tests {
     fn observe_with_idempotency_key_returns_existing_row_on_repeat() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
-        let s = r
-            .start_session(SessionStartInput {
-                name: "s".to_string(),
-            })
-            .expect("start");
+        let s = r.start_session(minimal_session_start("s")).expect("start");
         let a = r
-            .observe(ObserveInput {
-                session_id: s.id.clone(),
-                content: "first".to_string(),
-                tool_name: None,
-                idempotency_key: Some("dup".to_string()),
-            })
+            .observe(minimal_observe(
+                s.id.clone(),
+                "first".to_string(),
+                None,
+                Some("dup".to_string()),
+            ))
             .expect("first");
         let b = r
-            .observe(ObserveInput {
-                session_id: s.id.clone(),
-                content: "DIFFERENT".to_string(),
-                tool_name: None,
-                idempotency_key: Some("dup".to_string()),
-            })
+            .observe(minimal_observe(
+                s.id.clone(),
+                "DIFFERENT".to_string(),
+                None,
+                Some("dup".to_string()),
+            ))
             .expect("second");
         assert_eq!(a.id, b.id, "idempotency: same id on repeat");
         assert_eq!(a.created_at, b.created_at, "created_at must not change");
@@ -637,9 +772,7 @@ mod tests {
         let db = dir.path().join("memora.db");
         let r = repo(&dir);
         let session = r
-            .start_session(SessionStartInput {
-                name: "concurrent".to_string(),
-            })
+            .start_session(minimal_session_start("concurrent"))
             .expect("start");
         let barrier = Arc::new(Barrier::new(2));
 
@@ -651,12 +784,12 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    repository.observe(ObserveInput {
-                        session_id,
-                        content: content.to_string(),
-                        tool_name: None,
-                        idempotency_key: Some("shared-key".to_string()),
-                    })
+                    repository.observe(minimal_observe(
+                        session_id.clone(),
+                        content.to_string(),
+                        None,
+                        Some("shared-key".to_string()),
+                    ))
                 })
             })
             .collect();
@@ -684,25 +817,11 @@ mod tests {
     fn observe_without_idempotency_key_always_writes_new_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
-        let s = r
-            .start_session(SessionStartInput {
-                name: "s".to_string(),
-            })
-            .expect("start");
-        r.observe(ObserveInput {
-            session_id: s.id.clone(),
-            content: "one".to_string(),
-            tool_name: None,
-            idempotency_key: None,
-        })
-        .expect("one");
-        r.observe(ObserveInput {
-            session_id: s.id.clone(),
-            content: "two".to_string(),
-            tool_name: None,
-            idempotency_key: None,
-        })
-        .expect("two");
+        let s = r.start_session(minimal_session_start("s")).expect("start");
+        r.observe(minimal_observe(s.id.clone(), "one".to_string(), None, None))
+            .expect("one");
+        r.observe(minimal_observe(s.id.clone(), "two".to_string(), None, None))
+            .expect("two");
         let conn = rusqlite::Connection::open(dir.path().join("memora.db")).expect("reopen");
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
@@ -715,12 +834,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
         let err = r
-            .observe(ObserveInput {
-                session_id: SessionId("nope".to_string()),
-                content: "x".to_string(),
-                tool_name: None,
-                idempotency_key: None,
-            })
+            .observe(minimal_observe(
+                SessionId("nope".to_string()),
+                "x".to_string(),
+                None,
+                None,
+            ))
             .expect_err("not found");
         assert!(matches!(err, MemoryError::SessionNotFound(_)));
     }
@@ -729,18 +848,14 @@ mod tests {
     fn recent_observations_filters_and_orders_by_created_desc() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
-        let s = r
-            .start_session(SessionStartInput {
-                name: "s".to_string(),
-            })
-            .expect("start");
+        let s = r.start_session(minimal_session_start("s")).expect("start");
         for i in 0..5 {
-            r.observe(ObserveInput {
-                session_id: s.id.clone(),
-                content: format!("item-{i}"),
-                tool_name: Some("Read".to_string()),
-                idempotency_key: None,
-            })
+            r.observe(minimal_observe(
+                s.id.clone(),
+                format!("item-{i}"),
+                Some("Read".to_string()),
+                None,
+            ))
             .expect("observe");
         }
         // 限定 session 取 3 条：应按 created_at DESC 倒序。
@@ -756,10 +871,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
         for i in 0..3 {
-            r.start_session(SessionStartInput {
-                name: format!("s-{i}"),
-            })
-            .expect("start");
+            r.start_session(minimal_session_start(&format!("s-{i}")))
+                .expect("start");
         }
         let recent = r.recent_sessions(2).expect("recent");
         assert_eq!(recent.len(), 2);
@@ -772,24 +885,20 @@ mod tests {
     fn search_finds_observation_by_keyword() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
-        let s = r
-            .start_session(SessionStartInput {
-                name: "s".to_string(),
-            })
-            .expect("start");
-        r.observe(ObserveInput {
-            session_id: s.id.clone(),
-            content: "数据库迁移失败".to_string(),
-            tool_name: None,
-            idempotency_key: None,
-        })
+        let s = r.start_session(minimal_session_start("s")).expect("start");
+        r.observe(minimal_observe(
+            s.id.clone(),
+            "数据库迁移失败".to_string(),
+            None,
+            None,
+        ))
         .expect("observe");
-        r.observe(ObserveInput {
-            session_id: s.id.clone(),
-            content: "memory database health check".to_string(),
-            tool_name: None,
-            idempotency_key: None,
-        })
+        r.observe(minimal_observe(
+            s.id.clone(),
+            "memory database health check".to_string(),
+            None,
+            None,
+        ))
         .expect("observe");
         // 用 ASCII 关键词（默认 unicode61 分词器对 CJK 较差不指望）；先用 "database"。
         let hits = r
@@ -808,22 +917,27 @@ mod tests {
     fn search_kind_summary_only_returns_summaries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
-        let s = r
-            .start_session(SessionStartInput {
-                name: "s".to_string(),
-            })
-            .expect("start");
+        let s = r.start_session(minimal_session_start("s")).expect("start");
         r.end_session(SessionEndInput {
             session_id: s.id.clone(),
             summary: Some("completed task alpha".to_string()),
+            // v003：summary_* 字段由 use case 填默认值与 SHA-256。
+            summary_content_hash: Some(
+                "6a2b799fb45b16d8fbaf3b31b96a1280c6b58d45840f379376715cfbde87ccf9".to_string(),
+            ),
+            summary_kind: Some("summary".to_string()),
+            summary_authority: Some("l1_summary".to_string()),
+            summary_origin: Some("user".to_string()),
+            summary_scope: Some("session".to_string()),
+            summary_source_refs_json: Some("[]".to_string()),
         })
         .expect("end");
-        r.observe(ObserveInput {
-            session_id: s.id.clone(),
-            content: "alpha observation".to_string(),
-            tool_name: None,
-            idempotency_key: None,
-        })
+        r.observe(minimal_observe(
+            s.id.clone(),
+            "alpha observation".to_string(),
+            None,
+            None,
+        ))
         .expect("observe");
         let hits = r
             .search(SearchInput {
@@ -845,30 +959,26 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let r = repo(&dir);
         let target = r
-            .start_session(SessionStartInput {
-                name: "target".to_string(),
-            })
+            .start_session(minimal_session_start("target"))
             .expect("target session");
         let other = r
-            .start_session(SessionStartInput {
-                name: "other".to_string(),
-            })
+            .start_session(minimal_session_start("other"))
             .expect("other session");
 
-        r.observe(ObserveInput {
-            session_id: target.id.clone(),
-            content: "needle target".to_string(),
-            tool_name: None,
-            idempotency_key: None,
-        })
+        r.observe(minimal_observe(
+            target.id.clone(),
+            "needle target".to_string(),
+            None,
+            None,
+        ))
         .expect("target observation");
         for index in 0..5 {
-            r.observe(ObserveInput {
-                session_id: other.id.clone(),
-                content: format!("needle needle needle other-{index}"),
-                tool_name: None,
-                idempotency_key: None,
-            })
+            r.observe(minimal_observe(
+                other.id.clone(),
+                format!("needle needle needle other-{index}"),
+                None,
+                None,
+            ))
             .expect("other observation");
         }
 

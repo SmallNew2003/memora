@@ -9,7 +9,10 @@ pub mod search;
 pub mod session;
 pub mod summary;
 
-pub use capability::{resolve_operation_mode, ClientCapabilities, OperationMode};
+pub use capability::{
+    resolve_operation_mode, ClientCapabilities, OperationMode, NATIVE_MEMORY_OPAQUE_TAG,
+    SESSION_LIFECYCLE_HOOK_TAG,
+};
 pub use observation::{Observation, ObservationId};
 pub use search::SearchHit;
 pub use session::{Session, SessionId};

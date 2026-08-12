@@ -32,7 +32,7 @@ use crate::application::ports::{
     MemoryRepository, ObserveInput, SearchKind, SessionEndInput, SessionStartInput,
 };
 use crate::application::{HealthService, MemoryService};
-use crate::domain::{RuntimeStatus, SessionId};
+use crate::domain::{OperationMode, RuntimeStatus, SessionId};
 
 /// `memora_status` tool 的入参：当前固定为空对象，预留未来扩展。
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -130,7 +130,17 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
         );
         let memory = Arc::clone(&self.memory);
         let session = blocking_memory("session_start", move || {
-            memory.start_session(SessionStartInput { name: params.name })
+            memory.start_session(SessionStartInput {
+                name: params.name,
+                // 1.3 落地：MCP `session_start` params 暂未暴露 capability 字段；
+                // 这里显式 `None`，use case 层走保守 `stateless-manual` 路径。
+                agent_id: None,
+                project_id: None,
+                external_session_ref: None,
+                client_capabilities: None,
+                operation_mode: OperationMode::StatelessManual,
+                capabilities_json: None,
+            })
         })
         .await?;
         let payload = serde_json::json!({
@@ -156,6 +166,12 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
             memory.end_session(SessionEndInput {
                 session_id: SessionId(params.session_id),
                 summary: params.summary,
+                summary_content_hash: None,
+                summary_kind: None,
+                summary_authority: None,
+                summary_origin: None,
+                summary_scope: None,
+                summary_source_refs_json: None,
             })
         })
         .await?;
@@ -190,6 +206,19 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
                 content: params.content,
                 tool_name: params.tool_name,
                 idempotency_key: params.idempotency_key,
+                // 1.4 落地：use case 层会计算 SHA-256 + 填默认值；
+                // 这里 MCP adapter 不暴露 v003 入参，先传 None 让 1.4 编译通过。
+                content_hash: None,
+                origin: None,
+                project_id: None,
+                fact_key: None,
+                scope: None,
+                kind: None,
+                authority: None,
+                source_refs: None,
+                source_refs_json: None,
+                expires_at: None,
+                supersedes_id: None,
             })
         })
         .await?;

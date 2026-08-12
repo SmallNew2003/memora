@@ -22,10 +22,24 @@
 -- UTC ISO-8601 字符串。
 
 -- ── ① sessions 扩展列（task 1.3） ─────────────────────────────────
+--
+-- `capabilities_json` 列说明：brief 1.3 明确要求 "client_capabilities == None
+-- ⇒ capabilities_json IS NULL（写 NULL，不写空对象）"。v003 最初定义为
+-- NOT NULL DEFAULT '{}'，但 NOT NULL 列无法写 NULL，造成 use case 层与 schema
+-- 层冲突。最下方的 UPDATE 已经把 `'{}'` 显式改写为 NULL，证明设计意图就是 NULLABLE。
+-- 这里保留 `capabilities_json` 为 NULLABLE（去掉 NOT NULL DEFAULT），让"未声明"
+-- 与"声明为空对象"在数据库里有可区分的持久化形态。
+--
+-- `last_active_at` 列说明：SQLite `ALTER TABLE ... ADD COLUMN ... DEFAULT <expr>`
+-- 拒绝非常量 default —— 表达式 `strftime(...)` 在 ADD COLUMN 路径下触发
+-- "Cannot add a column with non-constant default"（SQLite 限制）。改为字面量
+-- `'1970-01-01T00:00:00Z'`（UTC ISO-8601 epoch）作为回填；adapter 在 INSERT 新
+-- session 时通过 `?3` 双重绑定传入 `created_at`（与 design D2 一致），因此新行
+-- 立即得到实际 UTC 时间，不依赖 SQL DEFAULT。
 
-ALTER TABLE sessions ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE sessions ADD COLUMN capabilities_json TEXT;
 ALTER TABLE sessions ADD COLUMN operation_mode     TEXT NOT NULL DEFAULT 'stateless-manual';
-ALTER TABLE sessions ADD COLUMN last_active_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+ALTER TABLE sessions ADD COLUMN last_active_at     TEXT NOT NULL DEFAULT '1970-01-01T00:00:00Z';
 ALTER TABLE sessions ADD COLUMN archived_at        TEXT;
 
 -- ── ② observations / summaries 扩展列（task 1.4） ──────────────────
@@ -80,13 +94,9 @@ CREATE INDEX idx_sessions_archived_at ON sessions(archived_at) WHERE archived_at
 --   - sessions:     operation_mode='stateless-manual' / capabilities_json=NULL
 --     （即「旧会话未声明能力」的保守路径）。
 --
--- 上方 DEFAULT 已经把 sessions.capabilities_json 默认填了 '{}'，违反 brief
--- 「NULL」语义。下面 UPDATE 把 capabilities_json 重设为 NULL，明确表达「未声明」：
-UPDATE sessions SET capabilities_json = NULL WHERE capabilities_json = '{}';
-
--- observations 与 summaries 的 DEFAULT 已经满足 scope / kind / origin / authority，
--- 且 content_hash 默认为 NULL（无需重写）。下面 UPDATE 仅显式锁定语义，方便后续
--- schema diff / 测试断言：
+-- 上方列定义已经把 capabilities_json 设成 NULLABLE，不需要再做 "DEFAULT → NULL" 的
+-- 重写 UPDATE；以下两段回填仅显式锁定 observations/summaries 默认值，方便后续
+-- schema diff / 测试断言。
 UPDATE observations
    SET scope = 'session',
        kind = 'observation',
