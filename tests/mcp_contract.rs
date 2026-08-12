@@ -295,8 +295,8 @@ fn health_service_reports_healthy_for_stdio_transport() {
     assert_eq!(status.status, "healthy");
     assert_eq!(status.database, "healthy");
     assert_eq!(status.transport, "stdio");
-    // v1 + v2 已应用 → schema_version = 2。
-    assert_eq!(status.schema_version, 2);
+    // v1 + v2 + v3 已应用 → schema_version = 3。
+    assert_eq!(status.schema_version, 3);
 
     // 把 SqliteError / RuntimeConfig 引用一下，避免 unused 警告。
     let _: Result<SqliteHealthRepository, SqliteError> =
@@ -317,6 +317,6 @@ fn migrations_record_checksum_and_reapply_is_noop() {
             row.get(0)
         })
         .expect("count");
-    // v1 + v2 均应已记录；count = 2。
-    assert_eq!(n, 2, "exactly v1 and v2 migration rows");
+    // v1 + v2 + v3 均应已记录；count = 3。
+    assert_eq!(n, 3, "exactly v1, v2, v3 migration rows");
 }

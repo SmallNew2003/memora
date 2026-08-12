@@ -28,6 +28,10 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         sql: include_str!("v002__l1_memory.sql"),
     },
+    Migration {
+        version: 3,
+        sql: include_str!("v003__capability_profile_session.sql"),
+    },
 ];
 
 const SCHEMA_MIGRATIONS_DDL: &str = "\
@@ -253,8 +257,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut conn = Connection::open(dir.path().join("fresh.db")).expect("open");
         let version = apply_pending(&mut conn).expect("apply");
-        // binary 当前内嵌 v1 + v2；fresh db 一键应用全部，最高版本号 = 2。
-        assert_eq!(version, 2);
+        // binary 当前内嵌 v1 + v2 + v3；fresh db 一键应用全部，最高版本号 = 3。
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -299,13 +303,13 @@ mod tests {
 
         conn.execute(
             "INSERT INTO schema_migrations (version, checksum) VALUES (?1, ?2)",
-            rusqlite::params![3u32, "future-checksum"],
+            rusqlite::params![4u32, "future-checksum"],
         )
         .expect("seed future version");
 
         let err = apply_pending(&mut conn).expect_err("must reject");
         match err {
-            MigrationError::DatabaseTooNew { recorded, .. } => assert_eq!(recorded, 3),
+            MigrationError::DatabaseTooNew { recorded, .. } => assert_eq!(recorded, 4),
             other => panic!("expected DatabaseTooNew, got {other:?}"),
         }
     }

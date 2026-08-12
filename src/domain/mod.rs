@@ -3,11 +3,13 @@
 //! Domain 与 application、adapters 之间通过类型隔离；
 //! 本模块 MUST NOT 依赖 rusqlite、RMCP、Tokio、文件系统或时间相关 API。
 
+pub mod capability;
 pub mod observation;
 pub mod search;
 pub mod session;
 pub mod summary;
 
+pub use capability::{resolve_operation_mode, ClientCapabilities, OperationMode};
 pub use observation::{Observation, ObservationId};
 pub use search::SearchHit;
 pub use session::{Session, SessionId};
@@ -26,7 +28,7 @@ pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 实际 schema_version 不高于 binary 自身支持的最高版本）。Health query 的
 /// schema_version 永远走 `HealthRepository::current_schema_version()`，
 /// 避免出现「domain 常量 vs repo 上报值」的双源真相。
-pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// MCP transport 标识。当前仅启用 stdio；后续 transport 通过 enum 扩展，
 /// 切勿硬编码到业务层。
@@ -101,8 +103,8 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_version_is_two() {
-        // guard：binary 内嵌最高迁移版本号 = 2；新增迁移时同步递增。
-        assert_eq!(CURRENT_SCHEMA_VERSION, 2);
+    fn current_schema_version_is_three() {
+        // guard：binary 内嵌最高迁移版本号 = 3；新增迁移时同步递增。
+        assert_eq!(CURRENT_SCHEMA_VERSION, 3);
     }
 }

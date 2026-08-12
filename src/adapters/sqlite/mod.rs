@@ -161,11 +161,11 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_caches_schema_version_two() {
+    fn bootstrap_caches_schema_version_three() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("memora.db");
         let repo = SqliteHealthRepository::bootstrap(db).expect("bootstrap");
-        // v1 + v2 均已应用，最高版本号 = 2。
-        assert_eq!(repo.current_schema_version(), 2);
+        // v1 + v2 + v3 均已应用，最高版本号 = 3。
+        assert_eq!(repo.current_schema_version(), 3);
     }
 }

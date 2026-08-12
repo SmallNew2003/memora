@@ -172,7 +172,7 @@ fn memora_status_reports_schema_version_two() {
     let mut h = boot_mcp();
     let status = call_tool_ok(&mut h, "memora_status", serde_json::json!({}), 100);
     assert_eq!(status["status"], "healthy");
-    assert_eq!(status["schema_version"], 2);
+    assert_eq!(status["schema_version"], 3);
     drop(h.stdin);
     let _ = h.child.wait();
 }
