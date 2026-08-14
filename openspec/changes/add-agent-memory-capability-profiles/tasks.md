@@ -23,23 +23,23 @@
 
 ## 2. MCP 会话与能力协商
 
-- [ ] 2.1 扩展 `session_start` 以接受可选 client capabilities 和 external session ref，并在响应中返回 operation mode 及 fallback reason
+- [x] 2.1 扩展 `session_start` 以接受可选 client capabilities 和 external session ref，并在响应中返回 operation mode 及 fallback reason
   - **涉及文件**：`src/adapters/mcp/memory_tools.rs`、`src/adapters/mcp/mod.rs`、`src/application/use_cases/start_session.rs`、`src/domain/capability.rs`
   - **涉及测试**：`tests/mcp_contract.rs` 扩展 + `tests/capability_profiles_session.rs`
   - **AC**：① `SessionStartParams` 增加 `client_capabilities: Option<ClientCapabilities>` 与 `external_session_ref: Option<String>` 字段；② 响应 JSON 包含 `operation_mode` 与可选 `fallback_reason`；③ `mcp_contract.rs` 新增断言：未传 capabilities 时响应 `operation_mode="stateless-manual"` 且 `fallback_reason IS NULL`；传 `session_lifecycle="hook"` 时响应 `operation_mode="stateless-hooked"`
-- [ ] 2.2 实现按能力组合选择 `native-opaque`、`stateless-hooked` 与 `stateless-manual` 的纯逻辑，禁止依赖客户端产品名称
+- [x] 2.2 实现按能力组合选择 `native-opaque`、`stateless-hooked` 与 `stateless-manual` 的纯逻辑，禁止依赖客户端产品名称
   - **涉及文件**：`src/domain/capability.rs`（新增 `resolve_operation_mode` 函数）、`src/application/use_cases/start_session.rs`
   - **涉及测试**：`src/domain/capability.rs` 内嵌表格驱动测试
   - **AC**：① `resolve_operation_mode` 是纯函数，无 IO、无全局状态；② 表格驱动测试覆盖 4 类客户端：未声明 / `native_memory=opaque` / `lifecycle=hook` / 完全手动；③ 代码中 grep `client_name|product_name|agent_product` 必须 0 命中（CI grep 断言）
-- [ ] 2.3 为 `observe` 实现 idempotency key 验证与重复调用返回既有记录的行为
+- [x] 2.3 为 `observe` 实现 idempotency key 验证与重复调用返回既有记录的行为
   - **涉及文件**：`src/application/use_cases/observe.rs`、`src/application/ports.rs`、`src/adapters/sqlite/memory_repository.rs`
   - **涉及测试**：`tests/l1_session_memory.rs` 现有 idempotency 用例需仍通过 + `tests/capability_profiles_provenance.rs` 新增
   - **AC**：① 已有 `idempotency_key` 唯一索引保留；② 重复提交同 `(session_id, key)` 返回首次 `id` 与 `created_at`；③ 新增断言：`origin="memora_recall"` 重复内容（含原 `source_refs`）被识别为去重，新行不入库
-- [ ] 2.4 实现相同项目与 external session ref 的会话恢复，并为无法恢复的长期未活动会话实现归档路径
+- [x] 2.4 实现相同项目与 external session ref 的会话恢复，并为无法恢复的长期未活动会话实现归档路径
   - **涉及文件**：`src/application/use_cases/start_session.rs`、`src/application/use_cases/end_session.rs`、`src/adapters/sqlite/memory_repository.rs`、`src/config/mod.rs`（新增 `archive_after_seconds` 默认 30 天）
   - **涉及测试**：`tests/capability_profiles_recovery.rs`（新增）
   - **AC**：① 同 `(project_id, external_session_ref)` 二次 `session_start` 返回原未结束 `session_id`，且不创建新行；② `session_id` 不匹配但 `external_session_ref` 匹配且 `last_active_at` 超 30 天则把原行 `archived_at` 置当前 UTC，响应标记 `recovered=false`；③ 单元测试断言：跨 project 同 `external_session_ref` 不会触发恢复（必须 project 也匹配）
-- [ ] 2.5 为所有自动化能力缺失的响应统一返回 operation mode 和可识别的 fallback reason
+- [x] 2.5 为所有自动化能力缺失的响应统一返回 operation mode 和可识别的 fallback reason
   - **涉及文件**：`src/adapters/mcp/mod.rs`、`src/adapters/mcp/memory_tools.rs`、`src/application/errors.rs`
   - **涉及测试**：`tests/mcp_contract.rs` 扩展
   - **AC**：① 所有 `observe` / `session_end` / `search` 响应 envelope 增加 `operation_mode` 字段；② `fallback_reason` 在 capability 缺失时取 enum 值（`session_lifecycle_hook_unavailable` / `tool_capture_unavailable` / `context_injection_unavailable`）；③ 表格测试覆盖三个 reason 取值
