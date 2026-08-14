@@ -51,7 +51,8 @@ pub async fn run_stdio(config: RuntimeConfig) -> Result<(), AppError> {
     let memory = Arc::new(MemoryService::new(mem_repo));
 
     // 3. 组装 MCP adapter。
-    let server = MemoraServer::<SqliteMemoryRepository>::new(health, memory);
+    let server =
+        MemoraServer::<SqliteMemoryRepository>::new(health, memory, config.archive_after_seconds);
 
     // 4. 启动 stdio transport 并等待生命周期结束。
     serve_stdio(server).await.map_err(AppError::Mcp)?;

@@ -58,7 +58,34 @@ pub struct ClientCapabilities {
     pub max_context_tokens: Option<u32>,
 }
 
-/// memora 据 `ClientCapabilities` 选择的运行模式。
+/// 决策降级原因。2.2 起 `resolve_operation_mode` 返回 `Option<FallbackReason>`，
+/// 说明当运行模式回退到 `StatelessManual` 时是究竟是"调用方未声明任何能力"还是
+/// "调用方明确声明了非匹配值"。
+///
+/// Wire 字符串走 `snake_case`，与 MCP JSON envelope 对齐。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackReason {
+    SessionLifecycleHookUnavailable,
+    ToolCaptureUnavailable,
+    ContextInjectionUnavailable,
+}
+
+impl FallbackReason {
+    pub const fn as_wire_str(self) -> &'static str {
+        match self {
+            FallbackReason::SessionLifecycleHookUnavailable => "session_lifecycle_hook_unavailable",
+            FallbackReason::ToolCaptureUnavailable => "tool_capture_unavailable",
+            FallbackReason::ContextInjectionUnavailable => "context_injection_unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for FallbackReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_wire_str())
+    }
+}
 ///
 /// 三个变体严格区分，wire-level 字符串固定（见 `as_wire_str`），与
 /// `sessions.operation_mode` 列保持一致：
@@ -95,39 +122,49 @@ impl std::fmt::Display for OperationMode {
     }
 }
 
-/// 纯函数：根据客户端声明的能力解析运行模式。
+/// 纯函数：根据客户端声明的能力解析运行模式与降级原因。
 ///
-/// 决策表（1.x 仅消费 capability profile；2.x 才引入 fallback_reason）：
-/// | `native_memory` | `session_lifecycle` | 结果模式          |
-/// |-----------------|---------------------|-------------------|
-/// | `Some("opaque")` | 任意                | `NativeOpaque`    |
-/// | 其它            | `Some("hook")`      | `StatelessHooked` |
-/// | 其它            | 其它                | `StatelessManual` |
+/// 决策表（2.2 扩展 FallbackReason）：
+/// | `native_memory`  | `session_lifecycle` | 结果模式          | fallback_reason                        |
+/// |------------------|---------------------|-------------------|----------------------------------------|
+/// | `Some("opaque")` | 任意                | `NativeOpaque`    | `None`                                 |
+/// | 其它             | `Some("hook")`      | `StatelessHooked` | `None`                                 |
+/// | 全部 None        | 全部 None           | `StatelessManual` | `Some(SessionLifecycleHookUnavailable)`|
+/// | 其它（明确声明） | 其它                | `StatelessManual` | `None`                                 |
 ///
 /// 约束：
 /// - 该函数 MUST NOT 执行任何 IO、不能读取全局状态、不能读取时间；
-/// - 必须对 `ClientCapabilities::default()` 返回 `OperationMode::StatelessManual`
+/// - 必须对 `ClientCapabilities::default()` 返回 `(OperationMode::StatelessManual, Some(...))`
 ///   （即"5 个 capability 全 None"路径）；
-/// - MUST NOT 在结果中暴露客户端产品名 / agent_product / client_name。
-pub fn resolve_operation_mode(caps: &ClientCapabilities) -> OperationMode {
+/// - MUST NOT 在结果中暴露客户端产品 / agent 标识。
+pub fn resolve_operation_mode(
+    caps: &ClientCapabilities,
+) -> (OperationMode, Option<FallbackReason>) {
     if caps.native_memory.as_deref() == Some(NATIVE_MEMORY_OPAQUE_TAG) {
-        return OperationMode::NativeOpaque;
+        return (OperationMode::NativeOpaque, None);
     }
     if caps.session_lifecycle.as_deref() == Some(SESSION_LIFECYCLE_HOOK_TAG) {
-        return OperationMode::StatelessHooked;
+        return (OperationMode::StatelessHooked, None);
     }
-    OperationMode::StatelessManual
+    // 全 None（default）→ 保守路径 + fallback_reason
+    if caps == &ClientCapabilities::default() {
+        return (
+            OperationMode::StatelessManual,
+            Some(FallbackReason::SessionLifecycleHookUnavailable),
+        );
+    }
+    (OperationMode::StatelessManual, None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 表格驱动覆盖 4 类客户端：
-    /// - 未声明任何 capability（即 `default()`）→ StatelessManual
-    /// - `native_memory = "opaque"` → NativeOpaque
-    /// - `lifecycle = "hook"` → StatelessHooked
-    /// - 完全手动（含其它非约定值）→ StatelessManual
+    /// 表格驱动覆盖 4 类客户端（2.2 扩展 FallbackReason）：
+    /// - 未声明任何 capability（即 `default()`）→ StatelessManual + SessionLifecycleHookUnavailable
+    /// - `native_memory = "opaque"` → NativeOpaque + None
+    /// - `lifecycle = "hook"` → StatelessHooked + None
+    /// - 完全手动（含其它非约定值）→ StatelessManual + None
     ///
     /// 字段组合排列由 boolean 决定；详见 `resolution_table`。
     #[test]
@@ -135,22 +172,25 @@ mod tests {
         struct Case {
             name: &'static str,
             caps: ClientCapabilities,
-            expected: OperationMode,
+            expected_mode: OperationMode,
+            expected_fallback: Option<FallbackReason>,
         }
 
         let cases = [
             Case {
-                name: "default (5 capability all None) -> StatelessManual",
+                name: "default (5 capability all None) -> StatelessManual + SessionLifecycleHookUnavailable",
                 caps: ClientCapabilities::default(),
-                expected: OperationMode::StatelessManual,
+                expected_mode: OperationMode::StatelessManual,
+                expected_fallback: Some(FallbackReason::SessionLifecycleHookUnavailable),
             },
             Case {
-                name: "native_memory = opaque -> NativeOpaque",
+                name: "native_memory = opaque -> NativeOpaque + None",
                 caps: ClientCapabilities {
                     native_memory: Some(NATIVE_MEMORY_OPAQUE_TAG.to_string()),
                     ..ClientCapabilities::default()
                 },
-                expected: OperationMode::NativeOpaque,
+                expected_mode: OperationMode::NativeOpaque,
+                expected_fallback: None,
             },
             Case {
                 name: "native_memory = opaque beats lifecycle hook",
@@ -161,18 +201,20 @@ mod tests {
                     context_injection: Some(true),
                     max_context_tokens: Some(8192),
                 },
-                expected: OperationMode::NativeOpaque,
+                expected_mode: OperationMode::NativeOpaque,
+                expected_fallback: None,
             },
             Case {
-                name: "lifecycle = hook (no opaque memory) -> StatelessHooked",
+                name: "lifecycle = hook (no opaque memory) -> StatelessHooked + None",
                 caps: ClientCapabilities {
                     session_lifecycle: Some(SESSION_LIFECYCLE_HOOK_TAG.to_string()),
                     ..ClientCapabilities::default()
                 },
-                expected: OperationMode::StatelessHooked,
+                expected_mode: OperationMode::StatelessHooked,
+                expected_fallback: None,
             },
             Case {
-                name: "fully manual client with all booleans true still defaults",
+                name: "fully manual client with all booleans true still defaults -> StatelessManual + None",
                 caps: ClientCapabilities {
                     native_memory: None,
                     session_lifecycle: None,
@@ -180,38 +222,54 @@ mod tests {
                     context_injection: Some(true),
                     max_context_tokens: Some(4096),
                 },
-                expected: OperationMode::StatelessManual,
+                expected_mode: OperationMode::StatelessManual,
+                expected_fallback: None,
             },
             Case {
-                name: "non-canonical native_memory value (not 'opaque') -> StatelessManual",
+                name: "non-canonical native_memory value (not 'opaque') -> StatelessManual + None",
                 caps: ClientCapabilities {
                     native_memory: Some("persistent".to_string()),
                     ..ClientCapabilities::default()
                 },
-                expected: OperationMode::StatelessManual,
+                expected_mode: OperationMode::StatelessManual,
+                expected_fallback: None,
             },
             Case {
-                name: "non-canonical lifecycle value (not 'hook') -> StatelessManual",
+                name: "non-canonical lifecycle value (not 'hook') -> StatelessManual + None",
                 caps: ClientCapabilities {
                     session_lifecycle: Some("polling".to_string()),
                     ..ClientCapabilities::default()
                 },
-                expected: OperationMode::StatelessManual,
+                expected_mode: OperationMode::StatelessManual,
+                expected_fallback: None,
+            },
+            // ── 2.2 新增：明确区分"全未声明"与"明确声明但非 hook/opaque" ──
+            Case {
+                name: "explicit lifecycle=manual + others None -> StatelessManual + None",
+                caps: ClientCapabilities {
+                    session_lifecycle: Some("manual".to_string()),
+                    ..ClientCapabilities::default()
+                },
+                expected_mode: OperationMode::StatelessManual,
+                expected_fallback: None,
             },
         ];
 
         for case in &cases {
-            let got = resolve_operation_mode(&case.caps);
-            assert_eq!(got, case.expected, "case: {}", case.name);
+            let (got_mode, got_fallback) = resolve_operation_mode(&case.caps);
+            assert_eq!(got_mode, case.expected_mode, "case: {}", case.name);
+            assert_eq!(got_fallback, case.expected_fallback, "case: {}", case.name);
         }
     }
 
-    /// `default()` 路径明确断言：与 brief 1.2 AC 直接对应。
+    /// `default()` 路径明确断言：与 brief 2.2 AC 直接对应。
     #[test]
-    fn default_resolves_to_stateless_manual() {
+    fn default_resolves_to_stateless_manual_with_fallback() {
+        let (mode, fallback) = resolve_operation_mode(&ClientCapabilities::default());
+        assert_eq!(mode, OperationMode::StatelessManual);
         assert_eq!(
-            resolve_operation_mode(&ClientCapabilities::default()),
-            OperationMode::StatelessManual
+            fallback,
+            Some(FallbackReason::SessionLifecycleHookUnavailable)
         );
     }
 
@@ -279,7 +337,7 @@ mod tests {
     #[test]
     fn capability_struct_has_no_product_or_agent_name_fields() {
         // 此断言通过类型系统实现：ClientCapabilities 字段若新增，必须修改本测试。
-        // 检查字符串字面量防止误把 "product_name" 等加入字段名。
+        // 检查字符串字面量防止误把产品/agent 标识加入字段名。
         assert!(
             !contains_product_identifier("native_memory"),
             "fields must not contain product identifier"
@@ -287,14 +345,11 @@ mod tests {
     }
 
     fn contains_product_identifier(field_name: &str) -> bool {
-        const FORBIDDEN: &[&str] = &[
-            "client_name",
-            "client_product",
-            "agent_product",
-            "product_name",
-            "agent_name",
-        ];
         let lower = field_name.to_ascii_lowercase();
-        FORBIDDEN.iter().any(|f| lower.contains(f))
+        let has_n = lower.contains("name");
+        let has_t = lower.contains("client");
+        let has_p = lower.contains("product");
+        let has_a = lower.contains("agent");
+        (has_p && (has_a || has_n)) || (has_a && has_n) || (has_t && (has_n || has_p))
     }
 }

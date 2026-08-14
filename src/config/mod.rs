@@ -24,6 +24,9 @@ pub struct RuntimeConfig {
     pub db_path: PathBuf,
     /// MCP transport。当前唯一支持 stdio。
     pub transport: Transport,
+    /// 会话归档超时（秒）。超过该时间未活跃的 session 在 recovery 时被归档。
+    /// 默认 30 天 = 2592000 秒。
+    pub archive_after_seconds: u64,
 }
 
 impl RuntimeConfig {
@@ -40,6 +43,7 @@ impl RuntimeConfig {
         Ok(Self {
             db_path,
             transport: Transport::Stdio,
+            archive_after_seconds: 30 * 24 * 60 * 60, // 30 days
         })
     }
 
@@ -48,6 +52,7 @@ impl RuntimeConfig {
         Self {
             db_path: db_path.into(),
             transport: Transport::Stdio,
+            archive_after_seconds: 30 * 24 * 60 * 60,
         }
     }
 }

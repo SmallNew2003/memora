@@ -107,7 +107,7 @@ impl MemoryRepository for SqliteMemoryRepository {
 
         // 1. 更新 sessions.ended_at 与 sessions.summary（幂等）。
         tx.execute(
-            "UPDATE sessions SET ended_at = ?1, summary = COALESCE(?2, summary) WHERE id = ?3",
+            "UPDATE sessions SET ended_at = ?1, last_active_at = ?1, summary = COALESCE(?2, summary) WHERE id = ?3",
             params![ended_at, input.summary, input.session_id.0],
         )
         .map_err(|e| MemoryError::Storage(Box::new(e)))?;
@@ -370,9 +370,68 @@ impl MemoryRepository for SqliteMemoryRepository {
         // 最终截断到 limit（避免 observation + summary 各自返回 limit 条时超量）。
         hits.truncate(input.limit as usize);
 
-        // search 模块通过 SearchHit::from_observation/from_summary 构造，
-        // 保证字段顺序与 spec "响应字段稳定性" 一致。
         Ok(hits)
+    }
+
+    fn find_session(&self, session_id: &SessionId) -> Result<Option<Session>, MemoryError> {
+        let conn = self.open()?;
+        Ok(self.read_session(&conn, session_id))
+    }
+
+    fn find_by_session_idempotency_and_hash(
+        &self,
+        session_id: &SessionId,
+        idempotency_key: &str,
+        content_hash: &str,
+    ) -> Result<Option<ObservationId>, MemoryError> {
+        let conn = self.open()?;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM observations \
+                 WHERE session_id = ?1 AND idempotency_key = ?2 AND content_hash = ?3 \
+                 LIMIT 1",
+                params![session_id.0, idempotency_key, content_hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| MemoryError::Storage(Box::new(e)))?;
+        Ok(existing.map(ObservationId))
+    }
+
+    fn find_active_session_by_project_and_ref(
+        &self,
+        project_id: Option<&str>,
+        external_session_ref: Option<&str>,
+    ) -> Result<Option<Session>, MemoryError> {
+        let conn = self.open()?;
+        let sid: Option<String> = conn
+            .query_row(
+                "SELECT id FROM sessions \
+                 WHERE project_id = ?1 AND external_session_ref = ?2 AND archived_at IS NULL \
+                 LIMIT 1",
+                params![project_id, external_session_ref],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| MemoryError::Storage(Box::new(e)))?;
+        match sid {
+            Some(id) => Ok(self.read_session(&conn, &SessionId(id))),
+            None => Ok(None),
+        }
+    }
+
+    fn archive_session(
+        &self,
+        session_id: &SessionId,
+        archived_at: &str,
+    ) -> Result<(), MemoryError> {
+        let conn = self.open()?;
+        conn.execute(
+            "UPDATE sessions SET archived_at = ?1 WHERE id = ?2",
+            params![archived_at, session_id.0],
+        )
+        .map_err(|e| MemoryError::Storage(Box::new(e)))?;
+        Ok(())
     }
 }
 

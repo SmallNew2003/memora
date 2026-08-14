@@ -87,7 +87,7 @@ mod tests {
     use crate::application::ports::{
         MemoryRepository, ObserveInput, SearchInput, SessionStartInput,
     };
-    use crate::domain::{Observation, SearchHit, Session, SessionId, SummaryId};
+    use crate::domain::{Observation, ObservationId, SearchHit, Session, SessionId, SummaryId};
 
     struct CapturingRepo {
         last_input: std::sync::Mutex<Option<SessionEndInput>>,
@@ -141,6 +141,31 @@ mod tests {
         }
 
         fn search(&self, _: SearchInput) -> Result<Vec<SearchHit>, MemoryError> {
+            unreachable!()
+        }
+
+        fn find_session(&self, _: &SessionId) -> Result<Option<Session>, MemoryError> {
+            unreachable!()
+        }
+
+        fn find_by_session_idempotency_and_hash(
+            &self,
+            _: &SessionId,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<ObservationId>, MemoryError> {
+            unreachable!()
+        }
+
+        fn find_active_session_by_project_and_ref(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Option<Session>, MemoryError> {
+            unreachable!()
+        }
+
+        fn archive_session(&self, _: &SessionId, _: &str) -> Result<(), MemoryError> {
             unreachable!()
         }
     }

@@ -320,3 +320,255 @@ fn migrations_record_checksum_and_reapply_is_noop() {
     // v1 + v2 + v3 均应已记录；count = 3。
     assert_eq!(n, 3, "exactly v1, v2, v3 migration rows");
 }
+
+// ── 2.1 session_start capability envelope tests ──
+
+#[test]
+fn session_start_without_capabilities_returns_stateless_manual_and_null_fallback() {
+    let (_guard, db) = temp_db_path();
+    let mut child = spawn_memora(&db);
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = shared_stdout(&mut child);
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "test", "version": "0.0.0" } }
+    });
+    writeln!(stdin, "{init}").expect("write init");
+    stdin.flush().expect("flush");
+    read_line(Arc::clone(&stdout));
+    let notif =
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}});
+    writeln!(stdin, "{notif}").expect("write initialized");
+    stdin.flush().expect("flush");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "session_start", "arguments": { "name": "test-session" } }
+    });
+    writeln!(stdin, "{call}").expect("write session_start");
+    stdin.flush().expect("flush");
+    let line = read_line(Arc::clone(&stdout));
+    let resp: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    let result = resp.get("result").expect("result");
+    let content = result
+        .get("content")
+        .and_then(|v| v.as_array())
+        .expect("content array");
+    let text = content[0]
+        .get("text")
+        .and_then(|v| v.as_str())
+        .expect("text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
+
+    assert_eq!(payload["operation_mode"], "stateless-manual");
+    assert!(payload["fallback_reason"].is_null());
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn session_start_with_hook_capabilities_returns_stateless_hooked() {
+    let (_guard, db) = temp_db_path();
+    let mut child = spawn_memora(&db);
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = shared_stdout(&mut child);
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "test", "version": "0.0.0" } }
+    });
+    writeln!(stdin, "{init}").expect("write init");
+    stdin.flush().expect("flush");
+    read_line(Arc::clone(&stdout));
+    let notif =
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}});
+    writeln!(stdin, "{notif}").expect("write initialized");
+    stdin.flush().expect("flush");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {
+            "name": "session_start",
+            "arguments": {
+                "name": "hooked-session",
+                "client_capabilities": { "session_lifecycle": "hook" }
+            }
+        }
+    });
+    writeln!(stdin, "{call}").expect("write session_start");
+    stdin.flush().expect("flush");
+    let line = read_line(Arc::clone(&stdout));
+    let resp: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    let result = resp.get("result").expect("result");
+    let content = result
+        .get("content")
+        .and_then(|v| v.as_array())
+        .expect("content array");
+    let text = content[0]
+        .get("text")
+        .and_then(|v| v.as_str())
+        .expect("text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
+
+    assert_eq!(payload["operation_mode"], "stateless-hooked");
+    assert!(payload["fallback_reason"].is_null());
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn session_start_with_incomplete_capabilities_returns_stateless_manual_with_fallback() {
+    let (_guard, db) = temp_db_path();
+    let mut child = spawn_memora(&db);
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = shared_stdout(&mut child);
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "test", "version": "0.0.0" } }
+    });
+    writeln!(stdin, "{init}").expect("write init");
+    stdin.flush().expect("flush");
+    read_line(Arc::clone(&stdout));
+    let notif =
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}});
+    writeln!(stdin, "{notif}").expect("write initialized");
+    stdin.flush().expect("flush");
+
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {
+            "name": "session_start",
+            "arguments": {
+                "name": "incomplete-session",
+                "client_capabilities": {}
+            }
+        }
+    });
+    writeln!(stdin, "{call}").expect("write session_start");
+    stdin.flush().expect("flush");
+    let line = read_line(Arc::clone(&stdout));
+    let resp: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    let result = resp.get("result").expect("result");
+    let content = result
+        .get("content")
+        .and_then(|v| v.as_array())
+        .expect("content array");
+    let text = content[0]
+        .get("text")
+        .and_then(|v| v.as_str())
+        .expect("text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
+
+    assert_eq!(payload["operation_mode"], "stateless-manual");
+    assert_eq!(
+        payload["fallback_reason"],
+        "session_lifecycle_hook_unavailable"
+    );
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+// ── 2.5 observe / search fallback_reason 表格测试 ──
+
+#[test]
+fn observe_without_tool_capture_returns_fallback_reason() {
+    let (_guard, db) = temp_db_path();
+    let mut child = spawn_memora(&db);
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = shared_stdout(&mut child);
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "test", "version": "0.0.0" } }
+    });
+    writeln!(stdin, "{init}").expect("write init");
+    stdin.flush().expect("flush");
+    read_line(Arc::clone(&stdout));
+    let notif =
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}});
+    writeln!(stdin, "{notif}").expect("write initialized");
+    stdin.flush().expect("flush");
+
+    let start = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "session_start", "arguments": { "name": "obs-test" } }
+    });
+    writeln!(stdin, "{start}").expect("write session_start");
+    stdin.flush().expect("flush");
+    let line = read_line(Arc::clone(&stdout));
+    let resp: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    let text = resp["result"]["content"][0]["text"].as_str().expect("text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
+    let session_id = payload["session_id"].as_str().expect("session_id");
+
+    let obs = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": { "name": "observe", "arguments": { "session_id": session_id, "content": "test content" } }
+    });
+    writeln!(stdin, "{obs}").expect("write observe");
+    stdin.flush().expect("flush");
+    let line = read_line(Arc::clone(&stdout));
+    let resp: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    let text = resp["result"]["content"][0]["text"].as_str().expect("text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
+
+    assert_eq!(payload["operation_mode"], "stateless-manual");
+    assert_eq!(payload["fallback_reason"], "tool_capture_unavailable");
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn search_without_context_injection_returns_fallback_reason() {
+    let (_guard, db) = temp_db_path();
+    let mut child = spawn_memora(&db);
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = shared_stdout(&mut child);
+
+    let init = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "test", "version": "0.0.0" } }
+    });
+    writeln!(stdin, "{init}").expect("write init");
+    stdin.flush().expect("flush");
+    read_line(Arc::clone(&stdout));
+    let notif =
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}});
+    writeln!(stdin, "{notif}").expect("write initialized");
+    stdin.flush().expect("flush");
+
+    let start = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": { "name": "session_start", "arguments": { "name": "search-test" } }
+    });
+    writeln!(stdin, "{start}").expect("write session_start");
+    stdin.flush().expect("flush");
+    let line = read_line(Arc::clone(&stdout));
+    let resp: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    let text = resp["result"]["content"][0]["text"].as_str().expect("text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
+    let session_id = payload["session_id"].as_str().expect("session_id");
+
+    let search = serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": { "name": "search", "arguments": { "query": "test", "session_id": session_id } }
+    });
+    writeln!(stdin, "{search}").expect("write search");
+    stdin.flush().expect("flush");
+    let line = read_line(Arc::clone(&stdout));
+    let resp: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
+    let text = resp["result"]["content"][0]["text"].as_str().expect("text");
+    let payload: serde_json::Value = serde_json::from_str(text).expect("payload JSON");
+
+    assert_eq!(payload["operation_mode"], "stateless-manual");
+    assert_eq!(payload["fallback_reason"], "context_injection_unavailable");
+
+    drop(stdin);
+    let _ = child.wait();
+}

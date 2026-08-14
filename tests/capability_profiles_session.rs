@@ -183,7 +183,7 @@ fn existing_l1_behavior_preserved_across_v003_changes() {
 #[test]
 fn use_case_resolves_operation_mode_and_serializes_capabilities() {
     let (_dir, r) = repo();
-    let session = memora::application::use_cases::start_session::execute(
+    let output = memora::application::use_cases::start_session::execute(
         &r,
         SessionStartInput {
             name: "via-usecase".to_string(),
@@ -193,9 +193,11 @@ fn use_case_resolves_operation_mode_and_serializes_capabilities() {
             }),
             ..minimal_session_start("via-usecase")
         },
+        2592000,
     )
     .expect("start via use case");
 
+    let session = output.session;
     assert_eq!(session.operation_mode, OperationMode::StatelessHooked);
     assert!(session.capabilities_json.is_some());
 }

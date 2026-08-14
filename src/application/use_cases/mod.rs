@@ -12,7 +12,7 @@ pub mod search;
 pub mod start_session;
 
 use super::errors::MemoryError;
-use super::ports::{MemoryRepository, SearchKind};
+use super::ports::{MemoryRepository, SearchKind, SessionStartOutput};
 use crate::application::ports::{ObserveInput, SessionEndInput, SessionStartInput};
 use crate::domain::{Observation, SearchHit, Session, SessionId};
 
@@ -32,8 +32,12 @@ impl<R: MemoryRepository> MemoryService<R> {
         Self { repo }
     }
 
-    pub fn start_session(&self, input: SessionStartInput) -> Result<Session, MemoryError> {
-        start_session::execute(&self.repo, input)
+    pub fn start_session(
+        &self,
+        input: SessionStartInput,
+        archive_after_seconds: u64,
+    ) -> Result<SessionStartOutput, MemoryError> {
+        start_session::execute(&self.repo, input, archive_after_seconds)
     }
 
     pub fn end_session(&self, input: SessionEndInput) -> Result<Session, MemoryError> {
@@ -64,6 +68,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         limit: Option<u32>,
     ) -> Result<Vec<SearchHit>, MemoryError> {
         search::execute(&self.repo, query, session_id, kind, limit)
+    }
+
+    pub fn find_session(&self, session_id: &SessionId) -> Result<Option<Session>, MemoryError> {
+        self.repo.find_session(session_id)
     }
 }
 

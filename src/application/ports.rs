@@ -5,7 +5,7 @@
 //! adapter 直接耦合 MCP 参数结构）。
 
 use crate::domain::{
-    ClientCapabilities, Observation, OperationMode, SearchHit, Session, SessionId,
+    ClientCapabilities, Observation, ObservationId, OperationMode, SearchHit, Session, SessionId,
 };
 
 use super::errors::MemoryError;
@@ -32,6 +32,13 @@ pub struct SessionStartInput {
     pub operation_mode: OperationMode,
     /// 由 use case 计算；`None` ⇒ `capabilities_json IS NULL`。
     pub capabilities_json: Option<String>,
+}
+
+/// session_start 的输出（2.4 起扩展为包含 recovered 标记）。
+#[derive(Debug, Clone)]
+pub struct SessionStartOutput {
+    pub session: Session,
+    pub recovered: bool,
 }
 
 /// session_end 的入参。`summary == None` 时仅更新 `ended_at`。
@@ -160,4 +167,18 @@ pub trait MemoryRepository: Send + Sync + 'static {
     ) -> Result<Vec<Observation>, MemoryError>;
     fn recent_sessions(&self, limit: u32) -> Result<Vec<Session>, MemoryError>;
     fn search(&self, input: SearchInput) -> Result<Vec<SearchHit>, MemoryError>;
+    fn find_session(&self, session_id: &SessionId) -> Result<Option<Session>, MemoryError>;
+    fn find_by_session_idempotency_and_hash(
+        &self,
+        session_id: &SessionId,
+        idempotency_key: &str,
+        content_hash: &str,
+    ) -> Result<Option<ObservationId>, MemoryError>;
+    fn find_active_session_by_project_and_ref(
+        &self,
+        project_id: Option<&str>,
+        external_session_ref: Option<&str>,
+    ) -> Result<Option<Session>, MemoryError>;
+    fn archive_session(&self, session_id: &SessionId, archived_at: &str)
+        -> Result<(), MemoryError>;
 }

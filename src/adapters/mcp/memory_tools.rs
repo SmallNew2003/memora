@@ -11,11 +11,17 @@
 use rmcp::schemars;
 use serde::Deserialize;
 
+use crate::domain::ClientCapabilities;
+
 // ── 入参结构（每个 tool 对应一个），由 schemars 自动生成 JSON Schema ──
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SessionStartParams {
     pub name: String,
+    #[serde(default)]
+    pub client_capabilities: Option<ClientCapabilities>,
+    #[serde(default)]
+    pub external_session_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

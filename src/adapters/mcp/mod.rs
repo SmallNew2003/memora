@@ -32,7 +32,9 @@ use crate::application::ports::{
     MemoryRepository, ObserveInput, SearchKind, SessionEndInput, SessionStartInput,
 };
 use crate::application::{HealthService, MemoryService};
-use crate::domain::{OperationMode, RuntimeStatus, SessionId};
+use crate::domain::{
+    resolve_operation_mode, Observation, OperationMode, RuntimeStatus, Session, SessionId,
+};
 
 /// `memora_status` tool 的入参：当前固定为空对象，预留未来扩展。
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -47,14 +49,20 @@ pub struct StatusParams {}
 pub struct MemoraServer<R: MemoryRepository + 'static> {
     health: Arc<HealthService<SqliteHealthRepository>>,
     memory: Arc<MemoryService<R>>,
+    archive_after_seconds: u64,
 }
 
 impl<R: MemoryRepository + 'static> MemoraServer<R> {
     pub fn new(
         health: Arc<HealthService<SqliteHealthRepository>>,
         memory: Arc<MemoryService<R>>,
+        archive_after_seconds: u64,
     ) -> Self {
-        Self { health, memory }
+        Self {
+            health,
+            memory,
+            archive_after_seconds,
+        }
     }
 
     /// 直接返回 `RuntimeStatus`，供集成测试断言使用。
@@ -126,28 +134,46 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
         tracing::debug!(
             tool = "session_start",
             name_len = params.name.len(),
+            has_caps = params.client_capabilities.is_some(),
             "called"
         );
+
+        let (operation_mode, fallback_reason) = match &params.client_capabilities {
+            Some(caps) => {
+                let (mode, reason) = resolve_operation_mode(caps);
+                (mode, reason)
+            }
+            None => (OperationMode::StatelessManual, None),
+        };
+
         let memory = Arc::clone(&self.memory);
-        let session = blocking_memory("session_start", move || {
-            memory.start_session(SessionStartInput {
-                name: params.name,
-                // 1.3 落地：MCP `session_start` params 暂未暴露 capability 字段；
-                // 这里显式 `None`，use case 层走保守 `stateless-manual` 路径。
-                agent_id: None,
-                project_id: None,
-                external_session_ref: None,
-                client_capabilities: None,
-                operation_mode: OperationMode::StatelessManual,
-                capabilities_json: None,
-            })
+        let archive_after_seconds = self.archive_after_seconds;
+        let session_output = blocking_memory("session_start", move || {
+            memory.start_session(
+                SessionStartInput {
+                    name: params.name,
+                    agent_id: None,
+                    project_id: None,
+                    external_session_ref: params.external_session_ref,
+                    client_capabilities: params.client_capabilities,
+                    operation_mode,
+                    capabilities_json: None,
+                },
+                archive_after_seconds,
+            )
         })
         .await?;
-        let payload = serde_json::json!({
-            "session_id": session.id.0,
-            "name": session.name,
-            "created_at": session.created_at,
+        let mut payload = serde_json::json!({
+            "session_id": session_output.session.id.0,
+            "name": session_output.session.name,
+            "created_at": session_output.session.created_at,
+            "operation_mode": operation_mode.as_wire_str(),
+            "fallback_reason": null,
+            "recovered": session_output.recovered,
         });
+        if let Some(reason) = fallback_reason {
+            payload["fallback_reason"] = serde_json::json!(reason.as_wire_str());
+        }
         success(&payload)
     }
 
@@ -161,10 +187,11 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
         Parameters(params): Parameters<SessionEndParams>,
     ) -> Result<CallToolResult, McpError> {
         tracing::debug!(tool = "session_end", session_id = %params.session_id, has_summary = params.summary.is_some(), "called");
+        let sid = SessionId(params.session_id.clone());
         let memory = Arc::clone(&self.memory);
         let session = blocking_memory("session_end", move || {
             memory.end_session(SessionEndInput {
-                session_id: SessionId(params.session_id),
+                session_id: sid,
                 summary: params.summary,
                 summary_content_hash: None,
                 summary_kind: None,
@@ -179,6 +206,7 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
             "session_id": session.id.0,
             "ended_at": session.ended_at,
             "summary": session.summary,
+            "operation_mode": session.operation_mode.as_wire_str(),
         });
         success(&payload)
     }
@@ -199,36 +227,57 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
             has_idem = params.idempotency_key.is_some(),
             "called"
         );
+        let session_id = SessionId(params.session_id.clone());
         let memory = Arc::clone(&self.memory);
-        let obs = blocking_memory("observe", move || {
-            memory.observe(ObserveInput {
-                session_id: SessionId(params.session_id),
-                content: params.content,
-                tool_name: params.tool_name,
-                idempotency_key: params.idempotency_key,
-                // 1.4 落地：use case 层会计算 SHA-256 + 填默认值；
-                // 这里 MCP adapter 不暴露 v003 入参，先传 None 让 1.4 编译通过。
-                content_hash: None,
-                origin: None,
-                project_id: None,
-                fact_key: None,
-                scope: None,
-                kind: None,
-                authority: None,
-                source_refs: None,
-                source_refs_json: None,
-                expires_at: None,
-                supersedes_id: None,
+        let (obs, session): (Observation, Option<Session>) =
+            blocking_memory("observe", move || {
+                let obs = memory.observe(ObserveInput {
+                    session_id: session_id.clone(),
+                    content: params.content,
+                    tool_name: params.tool_name,
+                    idempotency_key: params.idempotency_key,
+                    content_hash: None,
+                    origin: None,
+                    project_id: None,
+                    fact_key: None,
+                    scope: None,
+                    kind: None,
+                    authority: None,
+                    source_refs: None,
+                    source_refs_json: None,
+                    expires_at: None,
+                    supersedes_id: None,
+                })?;
+                let session = memory.find_session(&session_id)?;
+                Ok((obs, session))
             })
-        })
-        .await?;
-        let payload = serde_json::json!({
+            .await?;
+        let operation_mode = session
+            .as_ref()
+            .map(|s| s.operation_mode)
+            .unwrap_or(OperationMode::StatelessManual);
+        let fallback_reason = if operation_mode == OperationMode::StatelessManual
+            && session
+                .as_ref()
+                .and_then(|s| s.capabilities_json.as_deref())
+                .is_none()
+        {
+            Some("tool_capture_unavailable")
+        } else {
+            None
+        };
+        let mut payload = serde_json::json!({
             "observation_id": obs.id.0,
             "session_id": obs.session_id.0,
             "content": obs.content,
             "tool_name": obs.tool_name,
             "created_at": obs.created_at,
+            "operation_mode": operation_mode.as_wire_str(),
+            "fallback_reason": null,
         });
+        if let Some(reason) = fallback_reason {
+            payload["fallback_reason"] = serde_json::json!(reason);
+        }
         success(&payload)
     }
 
@@ -327,16 +376,32 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
                 return Err(err.to_mcp_error());
             }
         };
+        let search_sid = params.session_id.map(|s| SessionId(s.clone()));
         let memory = Arc::clone(&self.memory);
-        let hits = blocking_memory("search", move || {
-            memory.search(
-                params.query,
-                params.session_id.map(SessionId),
-                kind,
-                params.limit,
-            )
-        })
-        .await?;
+        let (hits, session): (Vec<crate::domain::SearchHit>, Option<Session>) =
+            blocking_memory("search", move || {
+                let hits = memory.search(params.query, search_sid.clone(), kind, params.limit)?;
+                let session = match &search_sid {
+                    Some(sid) => memory.find_session(sid)?,
+                    None => None,
+                };
+                Ok((hits, session))
+            })
+            .await?;
+        let operation_mode = session
+            .as_ref()
+            .map(|s| s.operation_mode)
+            .unwrap_or(OperationMode::StatelessManual);
+        let fallback_reason = if operation_mode == OperationMode::StatelessManual
+            && session
+                .as_ref()
+                .and_then(|s| s.capabilities_json.as_deref())
+                .is_none()
+        {
+            Some("context_injection_unavailable")
+        } else {
+            None
+        };
         let items: Vec<serde_json::Value> = hits
             .into_iter()
             .map(|h| {
@@ -356,10 +421,15 @@ impl<R: MemoryRepository + 'static> MemoraServer<R> {
                 item
             })
             .collect();
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "total": items.len(),
             "results": items,
+            "operation_mode": operation_mode.as_wire_str(),
+            "fallback_reason": null,
         });
+        if let Some(reason) = fallback_reason {
+            payload["fallback_reason"] = serde_json::json!(reason);
+        }
         success(&payload)
     }
 }

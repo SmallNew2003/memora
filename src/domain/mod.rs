@@ -10,8 +10,8 @@ pub mod session;
 pub mod summary;
 
 pub use capability::{
-    resolve_operation_mode, ClientCapabilities, OperationMode, NATIVE_MEMORY_OPAQUE_TAG,
-    SESSION_LIFECYCLE_HOOK_TAG,
+    resolve_operation_mode, ClientCapabilities, FallbackReason, OperationMode,
+    NATIVE_MEMORY_OPAQUE_TAG, SESSION_LIFECYCLE_HOOK_TAG,
 };
 pub use observation::{Observation, ObservationId};
 pub use search::SearchHit;

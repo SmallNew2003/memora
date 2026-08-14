@@ -86,14 +86,53 @@ pub fn execute<R: MemoryRepository>(
     let source_refs_json = serde_json::to_string(&input.source_refs.clone().unwrap_or_default())
         .map_err(|e| MemoryError::Storage(Box::new(e)))?;
 
+    // 2.3: memora_recall 重复内容去重 —— 当 origin == "memora_recall" 且
+    // 同时提供 idempotency_key 时，先按 (session_id, idempotency_key, content_hash)
+    // 查既有 observation，命中则直接返回既有 id，不写新行。
+    // memora_recall 使用带 content_hash 前缀的 transformed key 写入数据库，
+    // 避免与 user 调用的 idempotency_key 冲突，同时允许不同 content_hash 的同 key 多次写入。
+    let memora_recall_key = if input.origin.as_deref() == Some("memora_recall") {
+        input
+            .idempotency_key
+            .as_ref()
+            .map(|k| format!("memora_recall:{}:{}", k, &content_hash[..8]))
+    } else {
+        None
+    };
+
+    if let Some(ref key) = memora_recall_key {
+        if let Some(existing_id) =
+            repo.find_by_session_idempotency_and_hash(&input.session_id, key, &content_hash)?
+        {
+            return Ok(Observation {
+                id: existing_id,
+                session_id: input.session_id,
+                content: input.content,
+                tool_name: input.tool_name,
+                created_at: String::new(),
+                content_hash: Some(content_hash),
+                origin: Some(origin),
+                scope: Some(scope),
+                kind: Some(kind),
+                authority: Some(authority),
+                source_refs_json: Some(source_refs_json),
+                project_id: input.project_id,
+                fact_key: input.fact_key,
+                expires_at: input.expires_at,
+                supersedes_id: input.supersedes_id,
+            });
+        }
+    }
+
     repo.observe(ObserveInput {
         content_hash: Some(content_hash),
         origin: Some(origin),
         scope: Some(scope),
         kind: Some(kind),
         authority: Some(authority),
-        source_refs: None, // 已序列化到 source_refs_json，原值不需要再传
+        source_refs: None,
         source_refs_json: Some(source_refs_json),
+        idempotency_key: memora_recall_key.or(input.idempotency_key),
         ..input
     })
 }
@@ -172,6 +211,31 @@ mod tests {
         }
 
         fn search(&self, _: SearchInput) -> Result<Vec<SearchHit>, MemoryError> {
+            unreachable!()
+        }
+
+        fn find_session(&self, _: &SessionId) -> Result<Option<Session>, MemoryError> {
+            unreachable!()
+        }
+
+        fn find_by_session_idempotency_and_hash(
+            &self,
+            _: &SessionId,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<ObservationId>, MemoryError> {
+            unreachable!()
+        }
+
+        fn find_active_session_by_project_and_ref(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Option<Session>, MemoryError> {
+            unreachable!()
+        }
+
+        fn archive_session(&self, _: &SessionId, _: &str) -> Result<(), MemoryError> {
             unreachable!()
         }
     }

@@ -226,6 +226,41 @@ fn sha256_hash_is_deterministic_across_calls() {
         {
             unreachable!()
         }
+
+        fn find_session(
+            &self,
+            _: &SessionId,
+        ) -> Result<Option<memora::domain::Session>, memora::application::errors::MemoryError>
+        {
+            unreachable!()
+        }
+
+        fn find_by_session_idempotency_and_hash(
+            &self,
+            _: &SessionId,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<memora::domain::ObservationId>, memora::application::errors::MemoryError>
+        {
+            unreachable!()
+        }
+
+        fn find_active_session_by_project_and_ref(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<Option<memora::domain::Session>, memora::application::errors::MemoryError>
+        {
+            unreachable!()
+        }
+
+        fn archive_session(
+            &self,
+            _: &SessionId,
+            _: &str,
+        ) -> Result<(), memora::application::errors::MemoryError> {
+            unreachable!()
+        }
     }
 
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -346,4 +381,217 @@ fn caller_supplied_project_id_and_authority_round_trip_through_recent() {
         .expect("search");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].kind, "observation");
+}
+
+// ── 2.3 memora_recall 重复内容去重测试 ──
+
+#[test]
+fn memora_recall_same_content_idempotency_returns_existing_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("memora.db");
+    memora::adapters::sqlite::open_and_migrate(&db).expect("migrate");
+    let repo = memora::adapters::sqlite::SqliteMemoryRepository::bootstrap(db.clone());
+
+    let session = repo
+        .start_session(memora::application::ports::SessionStartInput {
+            name: "dedup-test".to_string(),
+            agent_id: None,
+            project_id: None,
+            external_session_ref: None,
+            client_capabilities: None,
+            operation_mode: memora::domain::OperationMode::StatelessManual,
+            capabilities_json: None,
+        })
+        .expect("start");
+
+    let input = memora::application::ports::ObserveInput {
+        session_id: session.id.clone(),
+        content: "hello".to_string(),
+        tool_name: None,
+        idempotency_key: Some("K1".to_string()),
+        content_hash: None,
+        origin: Some("memora_recall".to_string()),
+        project_id: None,
+        fact_key: None,
+        scope: None,
+        kind: None,
+        authority: None,
+        source_refs: None,
+        source_refs_json: None,
+        expires_at: None,
+        supersedes_id: None,
+    };
+
+    let obs1 = memora::application::use_cases::observe::execute(&repo, input.clone())
+        .expect("first observe");
+    let obs2 =
+        memora::application::use_cases::observe::execute(&repo, input).expect("second observe");
+
+    assert_eq!(
+        obs1.id, obs2.id,
+        "same content + idempotency_key returns same id"
+    );
+
+    let conn = rusqlite::Connection::open(&db).expect("reopen");
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE session_id = ?1",
+            rusqlite::params![session.id.0],
+            |row| row.get(0),
+        )
+        .expect("count");
+    assert_eq!(n, 1, "no duplicate row written");
+}
+
+#[test]
+fn memora_recall_different_origin_writes_new_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("memora.db");
+    memora::adapters::sqlite::open_and_migrate(&db).expect("migrate");
+    let repo = memora::adapters::sqlite::SqliteMemoryRepository::bootstrap(db.clone());
+
+    let session = repo
+        .start_session(memora::application::ports::SessionStartInput {
+            name: "origin-test".to_string(),
+            agent_id: None,
+            project_id: None,
+            external_session_ref: None,
+            client_capabilities: None,
+            operation_mode: memora::domain::OperationMode::StatelessManual,
+            capabilities_json: None,
+        })
+        .expect("start");
+
+    let recall_input = memora::application::ports::ObserveInput {
+        session_id: session.id.clone(),
+        content: "hello".to_string(),
+        tool_name: None,
+        idempotency_key: Some("K1".to_string()),
+        content_hash: None,
+        origin: Some("memora_recall".to_string()),
+        project_id: None,
+        fact_key: None,
+        scope: None,
+        kind: None,
+        authority: None,
+        source_refs: None,
+        source_refs_json: None,
+        expires_at: None,
+        supersedes_id: None,
+    };
+
+    let _obs1 = memora::application::use_cases::observe::execute(&repo, recall_input)
+        .expect("first observe");
+
+    let user_input = memora::application::ports::ObserveInput {
+        session_id: session.id.clone(),
+        content: "hello".to_string(),
+        tool_name: None,
+        idempotency_key: Some("K1".to_string()),
+        content_hash: None,
+        origin: Some("user".to_string()),
+        project_id: None,
+        fact_key: None,
+        scope: None,
+        kind: None,
+        authority: None,
+        source_refs: None,
+        source_refs_json: None,
+        expires_at: None,
+        supersedes_id: None,
+    };
+
+    let obs2 = memora::application::use_cases::observe::execute(&repo, user_input)
+        .expect("second observe with different origin");
+
+    let conn = rusqlite::Connection::open(&db).expect("reopen");
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE session_id = ?1",
+            rusqlite::params![session.id.0],
+            |row| row.get(0),
+        )
+        .expect("count");
+    assert_eq!(n, 2, "different origin writes new row");
+    // Verify the second write has the correct origin
+    let stored_origin: String = conn
+        .query_row(
+            "SELECT origin FROM observations WHERE id = ?1",
+            rusqlite::params![obs2.id.0],
+            |row| row.get(0),
+        )
+        .expect("query");
+    assert_eq!(stored_origin, "user");
+}
+
+#[test]
+fn memora_recall_different_content_hash_writes_new_row() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("memora.db");
+    memora::adapters::sqlite::open_and_migrate(&db).expect("migrate");
+    let repo = memora::adapters::sqlite::SqliteMemoryRepository::bootstrap(db.clone());
+
+    let session = repo
+        .start_session(memora::application::ports::SessionStartInput {
+            name: "hash-test".to_string(),
+            agent_id: None,
+            project_id: None,
+            external_session_ref: None,
+            client_capabilities: None,
+            operation_mode: memora::domain::OperationMode::StatelessManual,
+            capabilities_json: None,
+        })
+        .expect("start");
+
+    let input1 = memora::application::ports::ObserveInput {
+        session_id: session.id.clone(),
+        content: "hello".to_string(),
+        tool_name: None,
+        idempotency_key: Some("K1".to_string()),
+        content_hash: None,
+        origin: Some("memora_recall".to_string()),
+        project_id: None,
+        fact_key: None,
+        scope: None,
+        kind: None,
+        authority: None,
+        source_refs: None,
+        source_refs_json: None,
+        expires_at: None,
+        supersedes_id: None,
+    };
+
+    let _obs1 =
+        memora::application::use_cases::observe::execute(&repo, input1).expect("first observe");
+
+    let input2 = memora::application::ports::ObserveInput {
+        session_id: session.id.clone(),
+        content: "world".to_string(),
+        tool_name: None,
+        idempotency_key: Some("K1".to_string()),
+        content_hash: None,
+        origin: Some("memora_recall".to_string()),
+        project_id: None,
+        fact_key: None,
+        scope: None,
+        kind: None,
+        authority: None,
+        source_refs: None,
+        source_refs_json: None,
+        expires_at: None,
+        supersedes_id: None,
+    };
+
+    let _obs2 = memora::application::use_cases::observe::execute(&repo, input2)
+        .expect("second observe with different content");
+
+    let conn = rusqlite::Connection::open(&db).expect("reopen");
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE session_id = ?1",
+            rusqlite::params![session.id.0],
+            |row| row.get(0),
+        )
+        .expect("count");
+    assert_eq!(n, 2, "different content_hash writes new row");
 }
